@@ -1,5 +1,4 @@
 /// Author @ Sriram Jallu
-/// Script For Generating AGB Simulated MAP and Covariates
 
 // Mexico, AOI
 var lat = 23.667048;
@@ -17,7 +16,7 @@ var cloudMask = function (img) {
   var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
               .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
   
-  return img.updateMask(mask).divide(1000);
+  return img.updateMask(mask).divide(10000);
 };
 
 
@@ -48,9 +47,9 @@ var indices = function(img) {
       'NIR': img.select('B8'),
       'RED': img.select('B4'),
       'BLUE': img.select('B2')
-    }).rename('EVI');
+    }).rename('EVI').clamp(-1, 1);
   
-  return img.addBands([ndvi, evi]);
+  return img.addBands([ndvi, evi]).toFloat();
 };
 
 
@@ -61,8 +60,8 @@ var meanEVI = datasetIndices.select('EVI').mean().clip(tileGeom);
 
 
 // DEM and Slope
-var dem = ee.Image("USGS/SRTMGL1_003").select('elevation').clip(tileGeom).rename('DEM');
-var slope = ee.Terrain.slope(dem).rename('SLOPE');
+var dem = ee.Image("USGS/SRTMGL1_003").select('elevation').clip(tileGeom).rename('DEM').toFloat();
+var slope = ee.Terrain.slope(dem).rename('SLOPE').toFloat();
 
 
 // Function for normalizing bands to [0, 1]
@@ -93,6 +92,12 @@ var covars = ndviNorm.rename('NDVI')
               .addBands(eviNorm.rename('EVI'))
               .addBands(demNorm.rename('DEM'))
               .addBands(slopeNorm.rename('SLOPE')).updateMask(forestMask);
+              
+
+var covarsNonNorm = meanNDVI.rename('NDVI')
+              .addBands(meanEVI.rename('EVI'))
+              .addBands(dem.rename('DEM'))
+              .addBands(slope.rename('SLOPE')).updateMask(forestMask);
 
 
 // Computing AGB map
@@ -113,23 +118,22 @@ var agbSim = covars.expression(
 var agbExport = agbSim.unmask(-9999);
 
 
-var agbMinMax = agbSim.select('AGB').reduceRegion({
+/*var agbMinMax = agbSim.select('EVI').reduceRegion({
     reducer: ee.Reducer.minMax(),
     scale: 30,
     geometry: tileGeom,
     maxPixels: 1e9
   });
-  
 
-print(agbMinMax);
+print(agbMinMax);*/
 
 
 Map.setCenter(lon, lat, 9);
 /*Map.addLayer(forestMask, {}, 'Forest Mask');
 Map.addLayer(slopeClip, {}, 'Slope');
 Map.addLayer(meanNDVI, {min: -1, max: 1, palette: ["blue", "white", "green"]}, 'Mean NDVI');
-Map.addLayer(meanEVI, {palette: ["blue", "white", "green"]}, 'Mean EVI');
-Map.addLayer(dem, {min: 1000, max: 3000}, 'Elevation');*/
+Map.addLayer(dem, {min: 1000, max: 3000}, 'Elevation');
+Map.addLayer(meanEVI, {palette: ["blue", "white", "green"]}, 'Mean EVI');*/
 Map.addLayer(agbSim, {min: 0, max: 200, palette: ["blue", "white", "green"]}, 'Simulated AGB');
 
 var workingProj = ee.Projection('EPSG:32613').atScale(30);
@@ -146,12 +150,12 @@ Export.image.toDrive({
 });
 
 Export.image.toDrive({
-  image: covars,
+  image: covarsNonNorm,
   description: 'Covariates',
   folder: 'PhD_GEE_Exports',
   fileNamePrefix: 'Covariates',
   region: tileGeom,
   scale: 100,
   crs: 'EPSG:32613',
-  maxPixels: 1e13
+  maxPixels: 1e9
 });
