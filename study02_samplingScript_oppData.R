@@ -3,6 +3,7 @@ library(sf)
 library(ggplot2)
 library(terra)
 library(spcosa)
+library(FNN)
 
 setwd("C:/Documents_PhD/Study02/study02_data")
 
@@ -19,7 +20,7 @@ coordinates(agb_df) <- ~x+y
 gridded(agb_df) <- TRUE
 
 agb_df_plot <- as.data.frame(agb, xy = TRUE, na.rm = TRUE)
-mean(agb_df_plot$AGB)
+sd(agb_df_plot$AGB)
 
 
 ## Strongly Clustered Samples done with Compact GeoStrata DOI: 10.1016/j.ecoinf.2022.101665
@@ -73,4 +74,79 @@ ggplot() +
   ) +
   coord_sf() +
   theme_minimal()
+
+
+## Reading Covariates
+covars <- rast("Covariates.tif")
+
+covars_df <- as.data.frame(covars, xy = TRUE, na.rm = TRUE)
+coordinates(covars_df) <- ~x+y
+covars_names <- names(covars)
+
+
+extracted <- extract(covars, final_sample[, c("x", "y")])
+final_sample <- cbind(final_sample, extracted[, covars_names])
+head(final_sample)
+
+aux_df <- as.data.frame(covars, xy = TRUE, na.rm = TRUE)
+head(aux_df)
+
+
+## Normalizing Covariates for KNN
+norm_func <- function(df, colnames, min_vals = NULL, max_vals = NULL){
+  for (i in colnames){
+    df[[i]] <- (df[[i]] - min_vals[i])/(max_vals[i] - min_vals[i])
+  }
+  return(df)
+}
+
+B_min <- sapply(final_sample[covars_names], min, na.rm = TRUE)
+B_max <- sapply(final_sample[covars_names], max, na.rm = TRUE)
+
+
+aux_norm_df <- norm_func(aux_df, covars_names, B_min, B_max)
+final_sample_norm_df <- norm_func(final_sample, covars_names, B_min, B_max)
+
+
+## Creating a membership indicator for units in A
+aux_norm_df$mem_indicator <- paste(aux_norm_df$x, aux_norm_df$y) %in% paste(final_sample_norm_df$x, final_sample_norm_df$y)
+match_row <- match(paste(aux_norm_df$x, aux_norm_df$y), paste(final_sample_norm_df$x, final_sample_norm_df$y))
+
+
+## Matrices for KNN
+query_matrix <- as.matrix(aux_norm_df[, covars_names])
+data_matrix <- as.matrix(final_sample_norm_df[, covars_names])
+
+
+## KNN
+k <- 2
+knn_results <- get.knnx(data_matrix, query_matrix, k + 1) ## computes the ids of the closest K neighbors, along with distances, for units in query matrix
+head(knn_results)
+
+
+## Getting AGB values using the closest K neighbors, for B units, dropping its true y, so that there is a prediction there
+agb_impute <- numeric(nrow(aux_norm_df))
+
+for (i in seq_len(nrow(aux_norm_df))) {
+  id <- knn_results$nn.index[i, ]
+
+  if (!is.na(match_row[i])) {
+    id <- id[id != match_row[i]][1:k]
+  } else {
+    id <- id[1:k]
+  }
+  
+  agb_impute[i] <- mean(final_sample_norm_df$AGB[id])
+}
+
+
+aux_norm_df$agb_impute <- agb_impute
+
+
+## Logistic regression of the membership indicator
+sampling_model <- glm(mem_indicator ~ NDVI + EVI + DEM + SLOPE + agb_impute, family = binomial(link = "probit"), data = aux_norm_df)
+summary(sampling_model)
+
+
+
 
