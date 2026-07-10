@@ -1,0 +1,73 @@
+
+// Computing AGB map
+
+
+// Linear Combination
+var agbSim = covars.expression(
+  'B0 + B1*NDVI + B2*EVI + B3*DEM + B4*SLOPE',
+  {
+    'NDVI': covars.select('NDVI'),
+    'EVI': covars.select('EVI'),
+    'DEM': covars.select('DEM'),
+    'SLOPE': covars.select('SLOPE'),
+    'B0': 10,
+    'B1': 100,
+    'B2': 80,
+    'B3': -20,
+    'B4': 40
+  }).rename('AGB').toFloat();
+
+
+
+// Interaction Term - NDVI and DEM
+var agbSim = covars.expression(
+  'B0 + B1*NDVI + B2*EVI + B3*DEM + B4*SLOPE + B5*NDVI*DEM' ,
+  {
+    'NDVI': covars.select('NDVI'),
+    'EVI': covars.select('EVI'),
+    'DEM': covars.select('DEM'),
+    'SLOPE': covars.select('SLOPE'),
+    'B0': 10,
+    'B1': 110,
+    'B2': 80,
+    'B3': -20,
+    'B4': 40,
+    'B5': -15
+  }).rename('AGB').toFloat();
+
+
+
+// More Interaction Terms
+var agbSim = covars.expression(
+  'B0 + B1*NDVI + B2*EVI + B3*DEM + B4*SLOPE + B5*NDVI*DEM + B6*EVI*SLOPE + B7*NDVI*EVI' ,
+  {
+    'NDVI': covars.select('NDVI'),
+    'EVI': covars.select('EVI'),
+    'DEM': covars.select('DEM'),
+    'SLOPE': covars.select('SLOPE'),
+    'B0': 10,
+    'B1': 110,
+    'B2': 80,
+    'B3': -20,
+    'B4': 40,
+    'B5': -15,
+    'B6': 25,
+    'B7': -40
+  }).rename('AGB').toFloat();
+
+
+
+// Exponential Terms
+var agbSim = covars.expression(
+  'B0 + B1*exp(NDVI) + B2*exp(EVI) + B3*DEM + B4*SLOPE' ,
+  {
+    'NDVI': covars.select('NDVI'),
+    'EVI': covars.select('EVI'),
+    'DEM': covars.select('DEM'),
+    'SLOPE': covars.select('SLOPE'),
+    'B0': 10,
+    'B1': 35,
+    'B2': 35,
+    'B3': -20,
+    'B4': 40
+  }).rename('AGB').toFloat();
