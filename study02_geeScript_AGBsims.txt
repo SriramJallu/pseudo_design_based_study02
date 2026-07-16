@@ -64,6 +64,11 @@ var dem = ee.Image("USGS/SRTMGL1_003").select('elevation').clip(tileGeom).rename
 var slope = ee.Terrain.slope(dem).rename('SLOPE').toFloat();
 
 
+// Canopy Height Map
+var canopyHeight = ee.Image('users/nlang/ETH_GlobalCanopyHeight_2020_10m_v1');
+var canopyHeightClip = canopyHeight.clip(tileGeom).rename('CHM').toFloat();
+
+
 // Function for normalizing bands to [0, 1]
 var normalize = function(img, band, geom) {
   var minMax = img.select(band).reduceRegion({
@@ -85,19 +90,22 @@ var ndviNorm = normalize(meanNDVI, 'NDVI', tileGeom);
 var eviNorm = normalize(meanEVI, 'EVI', tileGeom);
 var demNorm = normalize(dem, 'DEM', tileGeom);
 var slopeNorm = normalize(slope, 'SLOPE', tileGeom);
+var canopyHeightNorm = normalize(canopyHeightClip, 'CHM', tileGeom);
 
 
 // Stacking the covariates
 var covars = ndviNorm.rename('NDVI')
               .addBands(eviNorm.rename('EVI'))
               .addBands(demNorm.rename('DEM'))
-              .addBands(slopeNorm.rename('SLOPE')).updateMask(forestMask);
+              .addBands(slopeNorm.rename('SLOPE'))
+	      .addBands(canopyHeightNorm.rename('CHM')).updateMask(forestMask);
               
 
 var covarsNonNorm = meanNDVI.rename('NDVI')
               .addBands(meanEVI.rename('EVI'))
               .addBands(dem.rename('DEM'))
-              .addBands(slope.rename('SLOPE')).updateMask(forestMask);
+              .addBands(slope.rename('SLOPE'))
+	      .addBands(canopyHeightClip.rename('CHM')).updateMask(forestMask);
 
 
 // Computing AGB map

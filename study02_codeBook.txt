@@ -1,0 +1,4 @@
+## Codebook for Study02
+
+covariates#4 - NDVI, EVI, DEM and Slope
+covariates#5 - NDVI, EVI, DEM, Slope, Canopy Height Map (CHM)

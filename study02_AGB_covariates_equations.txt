@@ -11,8 +11,8 @@ var agbSim = covars.expression(
     'DEM': covars.select('DEM'),
     'SLOPE': covars.select('SLOPE'),
     'B0': 10,
-    'B1': 100,
-    'B2': 80,
+    'B1': 150,
+    'B2': 100,
     'B3': -20,
     'B4': 40
   }).rename('AGB').toFloat();
@@ -66,8 +66,8 @@ var agbSim = covars.expression(
     'DEM': covars.select('DEM'),
     'SLOPE': covars.select('SLOPE'),
     'B0': 10,
-    'B1': 35,
-    'B2': 35,
-    'B3': -20,
-    'B4': 40
+    'B1': 20,
+    'B2': 15,
+    'B3': -25,
+    'B4': 15
   }).rename('AGB').toFloat();

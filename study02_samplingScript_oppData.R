@@ -2,6 +2,8 @@ rm(list=ls())
 library(sp)
 library(sf)
 library(ggplot2)
+library(tidyr)
+library(dplyr)
 library(terra)
 library(spcosa)
 library(FNN)
@@ -9,13 +11,16 @@ library(future.apply)
 library(spatstat.geom)
 library(spatstat.random)
 library(alabama)
+library(UPSvarApprox)
+library(samplingVarEst)
+
 
 
 setwd("C:/Documents_PhD/Study02/study02_data")
 
 
 ## Load the Target Variable
-agb <- rast("study02_agb_simulated_exp_NDVI_EVI_corr.tif")
+agb <- rast("study02_agb_simulated_exp_NDVI_EVI.tif")
 plot(agb)
 
 ## Prepare Spatial DF of the target variable
@@ -26,7 +31,7 @@ gridded(agb_df) <- TRUE
 agb_df_plot <- as.data.frame(agb, xy = TRUE, na.rm = TRUE)
 sd(agb_df_plot$AGB)
 mean(agb_df_plot$AGB)
-
+head(agb_df_plot)
 
 ## Standardize AGB values
 m <- global(agb, "mean", na.rm = TRUE)[1, 1]
@@ -76,10 +81,18 @@ strongly_clustered_sample <- function(s = 0.9, sample_size, agb_wrapped, strata_
   ## Extracting target variable at these locations
   final_sample <- rbind(data.frame(x = cluster_sample$x, y = cluster_sample$y, ID = "cluster_stratum"),
                         data.frame(x = other_sample$x, y = other_sample$y, ID = "other_stratum"))
-  final_sample$AGB <- extract(agb, final_sample[, c("x", "y")])[, "AGB"]
+  final_sample$AGB <- terra::extract(agb, final_sample[, c("x", "y")])[, "AGB"]
   
   return(final_sample)
 }
+
+## Strongly Clustered Samples done with Compact GeoStrata DOI: 10.1016/j.ecoinf.2022.101665
+set.seed(123)
+n_strata <- 100
+stratification <- stratify(agb_df, nStrata = n_strata, nTry = 1)
+strata_map <- as(stratification, "SpatialPixelsDataFrame")
+strata_map_df <- as.data.frame(strata_map)
+strata_IDs <- unique(strata_map_df$stratumId)
 
 
 ## Function for generating Preferential Samples - Strength is controlled by var - Beta
@@ -116,10 +129,11 @@ pref_sample <- function(alpha = 0, beta = 1, sample_size, agb_wrapped, agb_std_w
     y = xy[, 2]
   )
   
-  final_sample$AGB <- extract(agb, final_sample[, c("x", "y")])[, "AGB"]
+  final_sample$AGB <- terra::extract(agb, final_sample[, c("x", "y")])[, "AGB"]
   
   return(final_sample)
 }
+
 
 ## Function for calculating pseudo weights using KNN imputation and modelling sampling mechanism (uses Logistic regression)
 pseudo_weight_clac <- function(rep_id, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean) {
@@ -130,7 +144,7 @@ pseudo_weight_clac <- function(rep_id, final_sample, agb_wrapped, covars_wrapped
   agb <- unwrap(agb_wrapped)
   covars <- unwrap(covars_wrapped)
 
-  extracted <- extract(covars, final_sample[, c("x", "y")])
+  extracted <- terra::extract(covars, final_sample[, c("x", "y")])
   final_sample <- cbind(final_sample, extracted[, covars_names])
   
   raw_covars <- final_sample[, covars_names]
@@ -189,7 +203,7 @@ pseudo_weight_clac <- function(rep_id, final_sample, agb_wrapped, covars_wrapped
   
   
   ## Logistic regression of the membership indicator
-  sampling_model <- glm(mem_indicator ~ NDVI + EVI + DEM + SLOPE + agb_impute, family = binomial(link = "probit"), data = aux_norm_df)
+  sampling_model <- glm(mem_indicator ~ NDVI + EVI + DEM + SLOPE + agb_impute, family = binomial(link = "logit"), data = aux_norm_df)
   
   non_prob_sample_pred <- final_sample_norm_df
   non_prob_sample_pred$agb_impute <- final_sample_norm_df$AGB
@@ -207,7 +221,17 @@ pseudo_weight_clac <- function(rep_id, final_sample, agb_wrapped, covars_wrapped
   naive_mean <- mean(final_sample_norm_df$AGB)
   pseudo_weight_mean <- (1/n) * sum(final_sample_norm_df$pseudo_weights * final_sample_norm_df$AGB)
   
+  var_est <- VE.Hajek.Mean.NHT(VecY.s = final_sample_norm_df$AGB, VecPk.s = final_sample_norm_df$inc_probs, N = nrow(aux_norm_df))
+  std_est <- sqrt(var_est)
+  lower_95ci <- pseudo_weight_mean - (1.96 * std_est)
+  upper_95ci <- pseudo_weight_mean + (1.96 * std_est)
+  
+  coverage <- (lower_95ci <= true_mean) & (upper_95ci >= true_mean)
+  
+  
   return(list(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, final_sample_norm_df = final_sample_norm_df))
+  # return(c(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, variance = var_est, std = std_est,
+  #          lower_bound = lower_95ci, upper_bound = upper_95ci, coverage = coverage))
   
 }
 
@@ -216,12 +240,13 @@ pseudo_weight_clac <- function(rep_id, final_sample, agb_wrapped, covars_wrapped
 plan(multisession, workers = parallel::detectCores() - 1)
 
 true_mean <- mean(agb_df_plot$AGB)
-mc_reps <- 5
+mc_reps <- 500
 
 set.seed(123)
 results_list <- future_lapply(
   1:mc_reps,
   function(r) {
+    # final_sample <- pref_sample(alpha = 0, beta = 1.5, sample_size = 500, agb_wrapped, agb_std_wrapped)
     final_sample <- strongly_clustered_sample(s = 0.9, 500, agb_wrapped, strata_IDs)
     result <- pseudo_weight_clac(r, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
     cat(sprintf("MC iter %d done\n", r), file = "progress_log.txt", append = TRUE)
@@ -233,39 +258,118 @@ results_list <- future_lapply(
 plan(sequential)
 
 results <- as.data.frame(do.call(rbind, results_list))
-head(results)
+write.csv(results, "C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_lm_clusteredSample.csv", row.names = FALSE)
+
 
 ## Accuracy metrics over the MC simulations
-bias_weighted <- mean(results$pseudo_weight_mean, na.rm = TRUE) - true_mean
-sd_weighted <- sd(results$pseudo_weight_mean, na.rm = TRUE)
-rmse_weighted <- sqrt(mean((results$pseudo_weight_mean - true_mean)^2, na.rm = TRUE))
+accuracy_metrics <- function(df, pop_mean) {
+  bias_weighted <- mean(df$pseudo_weight_mean, na.rm = TRUE) - pop_mean
+  sd_weighted <- sd(df$pseudo_weight_mean, na.rm = TRUE)
+  rmse_weighted <- sqrt(mean((df$pseudo_weight_mean - pop_mean)^2, na.rm = TRUE))
+  
+  return(data.frame(
+    Bias = bias_weighted,
+    Std = sd_weighted,
+    RMSE = rmse_weighted
+  ))
+}
 
-print(bias_weighted)
-print(sd_weighted)
-print(rmse_weighted)
 
+## Box plots showing naive mean and pseudo-weighted mean
+plot_df <- data.frame(
+  estimator = rep(c("naive_mean", "pseudo_weight_mean"), each = nrow(results)),
+  estimate = c(results$naive_mean, results$pseudo_weight_mean)
+)
+
+
+ggplot(plot_df, aes(x = estimator, y = estimate, fill = estimator)) +
+  geom_violin(alpha = 0.5, trim = FALSE) +
+  geom_boxplot(width = 0.15, outlier.shape = NA) +
+  geom_hline(yintercept = true_mean, linetype = "dashed", color = "red") +
+  scale_x_discrete(labels = c("naive_mean" = "Naive", "pseudo_weight_mean" = "Pseudo-Weighted")) +
+  labs(title = "Naive vs Pseudo-Weighted Mean Estimator",
+       subtitle = paste("Dashed line = true mean:", round(true_mean, 2)),
+       y = "AGB estimate", x = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+################################################################################################################
+## Plots to compare the results between different sampling configurations
+
+exp_resid10_clusSamp <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_clusteredSample.csv")
+exp_resid10_prefSamp15 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_prefSample15.csv")
+
+lm_resid10_clusSamp <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_lm_clusteredSample.csv")
+lm_resid10_prefSamp15 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_lm_prefSample15.csv")
+
+
+## Combined df for different sampling configurations (same underlying AGB)
+plot_df <- bind_rows(
+  exp_resid10_clusSamp %>%
+    select(naive_mean, pseudo_weight_mean) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "estimator",
+      values_to = "estimate"
+    ) %>%
+    mutate(sampling = "Clustered"),
+  
+  exp_resid10_prefSamp15 %>%
+    select(naive_mean, pseudo_weight_mean) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "estimator",
+      values_to = "estimate"
+    ) %>%
+    mutate(sampling = "Preferential")
+)
+
+
+## Box plot and violin plot over the MC simulations
+ggplot(plot_df, aes(x = estimator, y = estimate, fill = sampling)) +
+  geom_violin(alpha = 0.5, trim = FALSE) +
+  geom_boxplot(width = 0.15, outlier.shape = NA) +
+  geom_hline(yintercept = true_mean, linetype = "dashed", color = "red") +
+  facet_wrap(~sampling) +
+  scale_x_discrete(labels = c("naive_mean" = "Naive", "pseudo_weight_mean" = "Pseudo-Weighted")) +
+  labs(title = "Naive vs Pseudo-Weighted Mean Estimator",
+       subtitle = paste("Dashed line = true mean:", round(true_mean, 2)), ## need to take of the "true_mean" variable
+       y = "AGB estimate", x = NULL) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+
+## Need to update it manually based on which AGB simulation is being used
+true_mean_lm = 55.12
+true_mean_exp = 56.56
+
+
+## Accuracy metrics
+lm_resid10_clusSamp_AM <- accuracy_metrics(lm_resid10_clusSamp, pop_mean = true_mean_lm)
+lm_resid10_prefSamp15_AM <- accuracy_metrics(lm_resid10_prefSamp15, pop_mean = true_mean_lm)
+exp_resid10_clusSamp_AM <- accuracy_metrics(exp_resid10_clusSamp, pop_mean = true_mean_exp)
+exp_resid10_prefSamp15_AM <- accuracy_metrics(exp_resid10_prefSamp15, pop_mean = true_mean_exp)
+results_table <- rbind(
+  cbind(Model = "Linear - Strongly Clustered", lm_resid10_clusSamp_AM), 
+  cbind(Model = "Linear - Preferential", lm_resid10_prefSamp15_AM), 
+  cbind(Model = "Exp - Strongly Clustered", exp_resid10_clusSamp_AM), 
+  cbind(Model = "Exp - Preferential", exp_resid10_prefSamp15_AM))
 
 ################################################################################################################
 
 ## Set up for Empirical Likelihood, to estimate point masses (pseudo weights)
 set.seed(123)
 
-## Strongly Clustered Samples done with Compact GeoStrata DOI: 10.1016/j.ecoinf.2022.101665
-set.seed(123)
-n_strata <- 100
-stratification <- stratify(agb_df, nStrata = n_strata, nTry = 1)
-plot(stratification)
-
-strata_map <- as(stratification, "SpatialPixelsDataFrame")
-strata_map_df <- as.data.frame(strata_map)
-
-## Extracting stratas for clustering
-strata_IDs <- unique(strata_map_df$stratumId)
 
 ## Drawing an opportunistic sample
-# final_sample_pref <- pref_sample(alpha = 0, beta = 1.2, sample_size = 500, agb_wrapped, agb_std_wrapped)
-final_sample_pref <- strongly_clustered_sample(s = 0.9, sample_size = 500, agb_wrapped, strata_IDs)
+final_sample_pref <- pref_sample(alpha = 0, beta = 1.5, sample_size = 500, agb_wrapped, agb_std_wrapped)
+# final_sample_pref <- strongly_clustered_sample(s = 0.9, sample_size = 500, agb_wrapped, strata_IDs)
 final_sample_pref_sf <- st_as_sf(final_sample_pref, coords = c("x", "y"), crs = crs(agb))
+
+
+true_mean <- mean(agb_df_plot$AGB)
+
 
 ## Calling the function for estimating weights - modelling sampling mechanism and KNN
 pref_weights <- pseudo_weight_clac(1, final_sample_pref, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
@@ -326,28 +430,42 @@ result_EL <- auglag(par = p_init, fn = neg_logLik, heq = heq, hin = hin,
 
 p_hat <- result_EL$par  #point masses
 
+head(p_hat)
 
 ## HT estimator using the weights
 mu_y_EL <- sum(p_hat * pref_sample_udpate$AGB)
 mu_y_EL
 
 (mean(pref_sample_udpate$AGB))
+(mean(sum(pref_sample_udpate$AGB * pref_sample_udpate$pseudo_weights)))/nrow(aux_df)
 (mean(agb_df_plot$AGB))
 
 ################################################################################################################
 
 ## Ploting the samples
+# ggplot() +
+#   geom_raster(data = agb_df_plot, aes(x = x, y = y, fill = AGB)) +
+#   scale_fill_viridis_c(na.value = "transparent") +
+#   geom_sf(data = final_sample_pref_sf, aes(color = ID), size = 1.1, inherit.aes = FALSE) +
+#   scale_color_manual(
+#     name = "sample type",
+#     values = c("cluster_stratum" = "red", "other_stratum" ="yellow")
+#   ) +
+#   coord_sf() +
+#   theme_minimal()
+
 ggplot() +
   geom_raster(data = agb_df_plot, aes(x = x, y = y, fill = AGB)) +
   scale_fill_viridis_c(na.value = "transparent") +
-  geom_sf(data = final_sample_cluster_sf, aes(color = ID), size = 1.1, inherit.aes = FALSE) +
-  scale_color_manual(
-    name = "sample type",
-    values = c("cluster_stratum" = "red", "other_stratum" ="black")
-  ) +
+  geom_sf(data = final_sample_pref_sf, color = "red", size = 1.2, inherit.aes = FALSE) +
   coord_sf() +
   theme_minimal()
 
+ggplot() +
+  geom_raster(data = agb_df_plot, aes(x = x, y = y, fill = AGB)) +
+  scale_fill_viridis_c(na.value = "transparent") +
+  coord_sf() +
+  theme_minimal()
 
 ggplot() +
   geom_raster(data = agb_df_plot, aes(x = x, y = y, fill = AGB)) +
@@ -357,7 +475,184 @@ ggplot() +
   theme_minimal()
 
 
+?VE.Hajek.Mean.NHT
+print(nrow(aux_df))
+var_est <- VE.Hajek.Mean.NHT(VecY.s = pref_sample_udpate$AGB, VecPk.s = pref_sample_udpate$inc_probs, N = nrow(aux_df))
+print(sqrt(var_est))
 
 
+var_est_2 <- approx_var_est(pref_sample_udpate$AGB, pref_sample_udpate$inc_probs, "Hajek")/(nrow(aux_df))^2
+print(sqrt(var_est_2))
 
 
+###############################################################################################################
+
+
+# pseudo_weight_clac <- function(rep_id, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean, B = 100) {
+#   
+#   library(FNN)
+#   library(terra)
+#   
+#   agb <- unwrap(agb_wrapped)
+#   covars <- unwrap(covars_wrapped)
+#   
+#   extracted <- extract(covars, final_sample[, c("x", "y")])
+#   final_sample <- cbind(final_sample, extracted[, covars_names])
+#   final_sample$row_id <- seq_len(nrow(final_sample))
+#   
+#   ## Normalizing Covariates for KNN
+#   norm_func <- function(df, colnames, min_vals = NULL, max_vals = NULL){
+#     for (i in colnames){
+#       df[[i]] <- (df[[i]] - min_vals[i])/(max_vals[i] - min_vals[i])
+#     }
+#     return(df)
+#   }
+#   
+#   
+#   boot_function <- function(fs, aux_df, k = 2) {
+#     
+#     raw_covars <- fs[, covars_names]
+#     colnames(raw_covars) <- paste0(covars_names, "_raw")
+#     
+#     B_min <- sapply(fs[covars_names], min, na.rm = TRUE)
+#     B_max <- sapply(fs[covars_names], max, na.rm = TRUE)
+#     
+#     
+#     aux_norm_df <- norm_func(aux_df, covars_names, B_min, B_max)
+#     fs_norm <- norm_func(fs, covars_names, B_min, B_max)
+#     fs_norm <- cbind(fs_norm, raw_covars)
+#     
+#     ## Creating a membership indicator for units in A
+#     aux_norm_df$mem_indicator <- paste(aux_norm_df$x, aux_norm_df$y) %in% paste(fs_norm$x, fs_norm$y)
+#     match_row <- match(paste(aux_norm_df$x, aux_norm_df$y), paste(fs_norm$x, fs_norm$y))
+#     
+#     
+#     ## Matrices for KNN
+#     query_matrix <- as.matrix(aux_norm_df[, covars_names])
+#     data_matrix <- as.matrix(fs_norm[, covars_names])
+#     
+#     
+#     ## KNN
+#     k <- 2
+#     knn_results <- get.knnx(data_matrix, query_matrix, k + 1) ## computes the ids of the closest K neighbors, along with distances, for units in query matrix
+#     
+#     
+#     ## Getting AGB values using the closest K neighbors, for B units, dropping its true y, so that there is a prediction there
+#     agb_impute <- numeric(nrow(aux_norm_df))
+#     
+#     for (i in seq_len(nrow(aux_norm_df))) {
+#       id <- knn_results$nn.index[i, ]
+#       
+#       if (!is.na(match_row[i])) {
+#         id <- id[id != match_row[i]][1:k]
+#       } else {
+#         id <- id[1:k]
+#       }
+#       
+#       agb_impute[i] <- mean(fs_norm$AGB[id])
+#     }
+#     
+#     
+#     aux_norm_df$agb_impute <- agb_impute
+#     
+#     ## Logistic regression of the membership indicator
+#     sampling_model <- glm(mem_indicator ~ NDVI + EVI + DEM + SLOPE + agb_impute, family = binomial(link = "logit"), data = aux_norm_df)
+#     
+#     non_prob_sample_pred <- fs_norm
+#     non_prob_sample_pred$agb_impute <- fs_norm$AGB
+#     
+#     
+#     ## Predicting inclusion probabilities & pseudo weights for the units of the non-probability sample
+#     fs_norm$inc_probs <- predict(sampling_model, newdata = non_prob_sample_pred, type = "response")
+#     
+#     fs_norm$pseudo_weights <- 1/fs_norm$inc_probs
+#     
+#     
+#     ## HT Estimator
+#     n <- nrow(aux_norm_df)
+#     
+#     naive_mean <- mean(fs_norm$AGB)
+#     pseudo_weight_mean <- (1/n) * sum(fs_norm$pseudo_weights * fs_norm$AGB)
+#     
+#     list(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, fs_norm = fs_norm)
+#     
+#   }
+#   
+#   full_fit <- boot_function(final_sample, aux_df, k = 2)
+#   
+#   n_fs <- nrow(final_sample)
+#   boot_means <- numeric(B)
+#   
+#   boot_means <- future_sapply(seq_len(B), function(b) {
+#     idx_b <- sample.int(n_fs, n_fs, replace = TRUE)
+#     fs_b <- final_sample[idx_b, , drop = FALSE]
+#     
+#     fit_b <- tryCatch(
+#       boot_function(fs_b, aux_df, k = 2),
+#       error = function(e) NULL
+#     )
+#     
+#     if (is.null(fit_b)) NA_real_ else fit_b$pseudo_weight_mean
+#   }, future.seed = TRUE)
+#   
+#   boot_means <- boot_means[!is.na(boot_means)]
+#   
+#   var_est <- var(boot_means)
+#   std_est <- sqrt(var_est)
+#   
+#   lower_95ci <- quantile(boot_means, 0.025, na.rm = TRUE)
+#   upper_95ci <- quantile(boot_means, 0.975, na.rm = TRUE)
+#   
+#   coverage <- (lower_95ci <= true_mean) & (upper_95ci >= true_mean)
+#   
+#   # return(list(rep = rep_id, naive_mean = full_fit$naive_mean, pseudo_weight_mean = full_fit$pseudo_weight_mean, final_sample_norm_df = full_fit$fs_norm,
+#   #             variance = var_est, std = std_est, lower_bound = lower_95ci, upper_bound = upper_95ci, coverage = coverage))
+#   return(c(rep = rep_id, naive_mean = full_fit$naive_mean, pseudo_weight_mean = full_fit$pseudo_weight_mean, variance = var_est, std = std_est,
+#            lower_bound = lower_95ci, upper_bound = upper_95ci, coverage = coverage))
+#   
+# }
+# 
+# 
+# 
+# plan(multisession, workers = parallel::detectCores() - 1)
+# 
+# true_mean <- mean(agb_df_plot$AGB)
+# mc_reps <- 1
+# 
+# results_list <- vector("list", mc_reps)
+# 
+# set.seed(123)
+# for(i in 1:mc_reps) {
+#     final_sample <- pref_sample(alpha = 0, beta = 1.5, sample_size = 500, agb_wrapped, agb_std_wrapped)
+#     # final_sample <- strongly_clustered_sample(s = 0.9, 500, agb_wrapped, strata_IDs)
+#     results_list[[i]] <- pseudo_weight_clac(i, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean, B = 100)
+#     cat(sprintf("MC iter %d done\n", i), file = "progress_log.txt", append = TRUE)
+# 
+#   }
+# 
+# plan(sequential)
+# 
+# 
+# 
+# results <- as.data.frame(do.call(rbind, results_list))
+# head(results)
+# 
+# 
+# 
+# set.seed(123)
+# final_sample_pref <- pref_sample(alpha = 0, beta = 1.5, sample_size = 500, agb_wrapped, agb_std_wrapped)
+# # final_sample_pref <- strongly_clustered_sample(s = 0.9, sample_size = 500, agb_wrapped, strata_IDs)
+# final_sample_pref_sf <- st_as_sf(final_sample_pref, coords = c("x", "y"), crs = crs(agb))
+# 
+# true_mean <- mean(agb_df_plot$AGB)
+# 
+# ## Calling the function for estimating weights - modelling sampling mechanism and KNN
+# pref_weights <- pseudo_weight_clac(1, final_sample_pref, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean, B = 5)
+# pref_sample_udpate <- pref_weights$final_sample_norm_df
+# head(pref_sample_udpate$pseudo_weights)
+# print(pref_weights$pseudo_weight_mean)
+# print(pref_weights$naive_mean)
+# print(true_mean)
+# print(pref_weights$variance)
+# print(pref_weights$std)
+# print(pref_weights$coverage)
