@@ -4,13 +4,26 @@ library(sf)
 library(ggplot2)
 library(terra)
 library(gstat)
+library(moments)
 
 
 setwd("C:/Documents_PhD/Study02/study02_data")
 
 
 ## Reading and Normalizing Covariates
-covars <- rast("study02_env_covariates#4.tif")
+covars <- rast("study02_env_covariates#6.tif")
+agb <- rast("AGB_CCI_ver02.tif")
+agb[agb == -9999] <- NA
+print(covars)
+
+
+common_mask <- !is.na(agb) & !any(is.na(covars))
+agb_matched    <- mask(agb, common_mask, maskvalue = FALSE)
+covars_matched <- mask(covars, common_mask, maskvalue = FALSE)
+
+
+writeRaster(agb_matched, "study02_agb_CCI_filtered.tif")
+writeRaster(covars_matched, "study02_env_covariates#6_filtered.tif")
 
 normalize <- function(r) {
   r_min <- global(r, "min", na.rm = TRUE)[1, 1]
@@ -30,14 +43,18 @@ SLOPE <- normalize(covars$SLOPE)
 # agb <- 10 + (20*(exp(NDVI))) + (15*(exp(EVI))) - (25*DEM) + (15*SLOPE)
 agb <- 10 + 50*(NDVI) + 50*(EVI) - 20*(DEM) + 40*(SLOPE)
 names(agb) <- "AGB"
+hist(agb, na.rm = TRUE)
+global(agb, fun = "mean", na.rm = TRUE)
+
 
 agb_df_plot <- as.data.frame(agb, xy = TRUE, na.rm = TRUE)
 sd(agb_df_plot$AGB)
 mean(agb_df_plot$AGB)
 hist(agb_df_plot$AGB)
 summary(agb_df_plot$AGB)
+skewness(agb_df_plot$AGB)
 
-writeRaster(agb, "study02_agb_simulated_lm.tif", overwrite = TRUE)
+# writeRaster(agb, "study02_agb_simulated_lm.tif", overwrite = TRUE)
 
 
 ## Creating a Gaussian Field to add to the AGB map
@@ -45,19 +62,28 @@ set.seed(123)
 w <- rast(agb)
 values(w) <- rnorm(ncell(w))
 
+plot(w)
+
 k <- focalMat(
   w, d = 1000, type = "Gauss"
 )
+
 
 w <- focal(
   w, w = k, fun = sum, na.rm = TRUE
 )
 
-w <- (w - global(w, "min", na.rm = TRUE)[1, 1]) / global(w, "sd", na.rm = TRUE)[1, 1]
+summary(w)
 
-sigma_spatial <- 15      #Controls the strength of the variance of the field
+w <- (w - global(w, "mean", na.rm = TRUE)[1, 1]) / global(w, "sd", na.rm = TRUE)[1, 1]
+plot(w)
+
+summary(w)
+
+sigma_spatial <- 5      #Controls the strength of the variance of the field
 w <- sigma_spatial * w
 names(w) <- "SpatialResidual"
+plot(w)
 
 agb_new <- agb + w
 names(agb_new) <- "AGB"
@@ -66,7 +92,7 @@ plot(agb_new)
 agb_new_df <- as.data.frame(agb_new, xy = TRUE, na.rm = TRUE)
 mean(agb_new_df$AGB)
 
-writeRaster(agb_new, "study02_agb_simulated_lm_resid15.tif", overwrite = TRUE)
+writeRaster(agb_new, "study02_agb_simulated_lm_resid05.tif", overwrite = TRUE)
 
 
 agb <- rast("study02_agb_simulated_exp_NDVI_EVI.tif")
@@ -91,3 +117,72 @@ ggplot() +
   coord_sf() +
   theme_minimal()
 
+
+
+################################################################################
+
+## Spatially correlated error simulation
+
+# Prediction grid
+pts <- as.data.frame(agb, xy = TRUE, na.rm = FALSE)
+coordinates(pts) <- ~x + y
+
+
+# Variogram model
+vgm_model <- vgm(
+  psill = 10,
+  model = "Exp",
+  range = 10000,
+  nugget = 0
+)
+
+# Kriging and Simulating a spatially correlated error field
+set.seed(123)
+g <- gstat(formula = z ~1, locations = ~x + y, dummy = TRUE, beta = 0, model = vgm_model, nmax = 30)
+sim <- predict(g, newdata = pts, nsim = 1)
+
+
+# Filtering Error df to match ncells
+agb_df <- as.data.frame(agb, xy = TRUE, na.rm = TRUE)
+sim_df <- as.data.frame(sim)
+
+
+filtered_sim_df <- merge(agb_df[, c("x", "y")], sim_df[, c("x","y","sim1")], by = c("x","y"), all.x = TRUE)
+write.csv(filtered_sim_df, "study02_results_expCorrelatedResid_psill10.csv", row.names = FALSE)
+
+
+## Adding the error with agb df
+
+## Reading the error csv and convertint to raster
+sim_df <- read.csv("study02_results_expCorrelatedResid_psill10.csv")
+sim_rast <- terra::rast(sim_df[, c("x", "y", "sim1")], type = "xyz") # Not used further
+plot(sim_rast)
+
+
+## Merging AGB and Error df
+agb_df <- as.data.frame(agb, xy = TRUE, na.rm = TRUE)
+agb_df <- merge(agb_df, sim_df[, c("x","y","sim1")], by = c("x","y"), all.x = TRUE)
+head(agb_df)
+
+colnames(agb_df)[3] <- "AGB_Trend"
+colnames(agb_df)[4] <- "Error"
+
+agb_df$AGB <- agb_df$AGB_Trend + agb_df$Error
+agb_df <- subset(agb_df, select = -c(AGB_Trend, Error))
+head(agb_df)
+
+
+## Tarnsforming df to raster
+agb_new <- rast(agb_df, type = "xyz")
+writeRaster(agb_new, "study02_agb_simulated_lm_expCorrResid10.tif", overwrite = TRUE)
+
+
+## Checking for variation explaination by LM 
+agb <- rast("study02_agb_simulated_lm_resid05.tif")
+agb_df <- as.data.frame(agb, xy = TRUE, na.rm = FALSE)
+
+covars_df <- as.data.frame(covars, xy = TRUE, na.rm = FALSE)
+
+agb_df2 <- merge(agb_df, covars_df, by = c("x", "y"), all.x = TRUE)
+
+summary(lm(AGB ~ NDVI + EVI + DEM + SLOPE, data = agb_df2))$r.squared
