@@ -1,4 +1,3 @@
-rm(list=ls())
 library(sp)
 library(sf)
 library(ggplot2)
@@ -11,11 +10,10 @@ setwd("C:/Documents_PhD/Study02/study02_data")
 
 
 ## Reading and Normalizing Covariates
-covars <- rast("study02_env_covariates#6.tif")
-agb <- rast("AGB_CCI_ver02.tif")
+covars <- rast("study02_env_covariates#4.tif")
+agb <- rast("study02_agb_simulated_exp_NDVI_EVI.tif")
 agb[agb == -9999] <- NA
 print(covars)
-
 
 common_mask <- !is.na(agb) & !any(is.na(covars))
 agb_matched    <- mask(agb, common_mask, maskvalue = FALSE)
@@ -23,7 +21,7 @@ covars_matched <- mask(covars, common_mask, maskvalue = FALSE)
 
 
 writeRaster(agb_matched, "study02_agb_CCI_filtered.tif")
-writeRaster(covars_matched, "study02_env_covariates#6_filtered.tif")
+writeRaster(covars_matched, "study02_env_covariates#4_filtered.tif")
 
 normalize <- function(r) {
   r_min <- global(r, "min", na.rm = TRUE)[1, 1]
@@ -130,7 +128,7 @@ coordinates(pts) <- ~x + y
 
 # Variogram model
 vgm_model <- vgm(
-  psill = 10,
+  psill = 35,
   model = "Exp",
   range = 10000,
   nugget = 0
@@ -148,41 +146,40 @@ sim_df <- as.data.frame(sim)
 
 
 filtered_sim_df <- merge(agb_df[, c("x", "y")], sim_df[, c("x","y","sim1")], by = c("x","y"), all.x = TRUE)
-write.csv(filtered_sim_df, "study02_results_expCorrelatedResid_psill10.csv", row.names = FALSE)
+summary(filtered_sim_df)
+filtered_sim_df_copy <- filtered_sim_df
+filtered_sim_df_copy$sim1 <- filtered_sim_df_copy$sim1 - mean(filtered_sim_df_copy$sim1, na.rm = TRUE)
+summary(filtered_sim_df_copy)
+write.csv(filtered_sim_df_copy, "study02_results_expCorrelatedResid_psill35.csv", row.names = FALSE)
 
 
 ## Adding the error with agb df
 
 ## Reading the error csv and convertint to raster
-sim_df <- read.csv("study02_results_expCorrelatedResid_psill10.csv")
+sim_df <- read.csv("study02_results_expCorrelatedResid_psill80.csv")
 sim_rast <- terra::rast(sim_df[, c("x", "y", "sim1")], type = "xyz") # Not used further
-plot(sim_rast)
 
+agb_new <- covars[[1]]
+values(agb_new) <- NA
+names(agb_new) <- "AGB"
 
-## Merging AGB and Error df
-agb_df <- as.data.frame(agb, xy = TRUE, na.rm = TRUE)
-agb_df <- merge(agb_df, sim_df[, c("x","y","sim1")], by = c("x","y"), all.x = TRUE)
-head(agb_df)
+agb_df_full <- as.data.frame(agb, xy = TRUE, na.rm = FALSE)
+agb_df_full$AGB_Trend <- agb_df_full[[3]]
+agb_df_full <- merge(agb_df_full, sim_df[, c("x", "y", "sim1")], by = c("x", "y"), all.x = TRUE)
+agb_df_full$AGB <- agb_df_full$AGB_Trend + agb_df_full$sim1
 
-colnames(agb_df)[3] <- "AGB_Trend"
-colnames(agb_df)[4] <- "Error"
+cells <- cellFromXY(agb_new, as.matrix(agb_df_full[, c("x", "y")]))
+values(agb_new)[cells] <- agb_df_full$AGB
 
-agb_df$AGB <- agb_df$AGB_Trend + agb_df$Error
-agb_df <- subset(agb_df, select = -c(AGB_Trend, Error))
-head(agb_df)
-
-
-## Tarnsforming df to raster
-agb_new <- rast(agb_df, type = "xyz")
-writeRaster(agb_new, "study02_agb_simulated_lm_expCorrResid10.tif", overwrite = TRUE)
+writeRaster(agb_new, "study02_agb_simulated_exp_NDVI_EVI_expCorrResid80.tif", overwrite = TRUE)
 
 
 ## Checking for variation explaination by LM 
-agb <- rast("study02_agb_simulated_lm_resid05.tif")
-agb_df <- as.data.frame(agb, xy = TRUE, na.rm = FALSE)
+agb_trend <- rast("study02_agb_simulated_exp_NDVI_EVI.tif")
+agb_trend_df <- as.data.frame(agb_trend, xy = TRUE, na.rm = FALSE)
 
-covars_df <- as.data.frame(covars, xy = TRUE, na.rm = FALSE)
+var_agb_trend <- var(agb_trend_df[[3]], na.rm = TRUE)
+var_resid <- var(sim_df[[3]], na.rm = TRUE)
 
-agb_df2 <- merge(agb_df, covars_df, by = c("x", "y"), all.x = TRUE)
-
-summary(lm(AGB ~ NDVI + EVI + DEM + SLOPE, data = agb_df2))$r.squared
+r2 <- var_agb_trend/(var_agb_trend + var_resid)
+r2
