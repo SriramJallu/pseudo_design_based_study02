@@ -100,7 +100,7 @@ strata_map <- as(stratification, "SpatialPixelsDataFrame")
 strata_map_df <- as.data.frame(strata_map)
 strata_IDs <- unique(strata_map_df$stratumId)
 
-strongly_clustered_sample_NM <- function(s = 0.9, sample_size, agb_wrapped, strata_IDs, strata_map_df) {
+# strongly_clustered_sample_NM <- function(s = 0.9, sample_size, agb_wrapped, strata_IDs, strata_map_df) {
   
   agb <- unwrap(agb_wrapped)
   
@@ -142,11 +142,38 @@ strongly_clustered_sample_NM <- function(s = 0.9, sample_size, agb_wrapped, stra
   adjusted_mu <- (N_cluster/N_total)*y_cluster + (N_other/N_total)*y_other
   
   return(data.frame(naive_mean = naive_mean, adjusted_mu = adjusted_mu))
-}
+# }
 
 
 ## Function for generating Preferential Samples - Strength is controlled by var - Beta
 # pref_sample <- function(alpha = 0, beta = 1, sample_size, agb_wrapped, agb_std_wrapped) {
+  
+  agb <- unwrap(agb_wrapped)
+  agb_std <- unwrap(agb_std_wrapped)
+  
+  ## Sampling Intensity - based on the Response
+  lambda <- exp(alpha + beta * agb_std)
+  v <- values(lambda)
+
+  valid <- !is.na(v) & v > 0
+  valid_cells <- which(valid)
+  weights <- v[valid]
+  
+  cells <- sample(valid_cells, size = sample_size, replace = FALSE, prob = weights)
+  
+  ## Extracting XY and AGB values for the points
+  xy <- xyFromCell(agb, cells)
+  
+  final_sample <- data.frame(
+    x = xy[, 1],
+    y = xy[, 2]
+  )
+  
+  final_sample$AGB <- terra::extract(agb, final_sample[, c("x", "y")])[, "AGB"]
+  
+  return(final_sample)
+# }
+pref_sample <- function(alpha = 0, beta = 1, sample_size, agb_wrapped, agb_std_wrapped) {
   
   agb <- unwrap(agb_wrapped)
   agb_std <- unwrap(agb_std_wrapped)
@@ -184,41 +211,13 @@ strongly_clustered_sample_NM <- function(s = 0.9, sample_size, agb_wrapped, stra
   return(final_sample)
 }
 
-pref_sample <- function(alpha = 0, beta = 1, sample_size, agb_wrapped, agb_std_wrapped) {
-  
-  agb <- unwrap(agb_wrapped)
-  agb_std <- unwrap(agb_std_wrapped)
-  
-  ## Sampling Intensity - based on the Response
-  lambda <- exp(alpha + beta * agb_std)
-  v <- values(lambda)
-
-  valid <- !is.na(v) & v > 0
-  valid_cells <- which(valid)
-  weights <- v[valid]
-  
-  cells <- sample(valid_cells, size = sample_size, replace = FALSE, prob = weights)
-  
-  ## Extracting XY and AGB values for the points
-  xy <- xyFromCell(agb, cells)
-  
-  final_sample <- data.frame(
-    x = xy[, 1],
-    y = xy[, 2]
-  )
-  
-  final_sample$AGB <- terra::extract(agb, final_sample[, c("x", "y")])[, "AGB"]
-  
-  return(final_sample)
-}
-
 
 ## Function for generating Conditioned Latin Hypercube Sampling
 clhs_sample <- function(sample_size = 500, agb_wrapped, covars_df = covars_df_new){
   
   agb <- unwrap(agb_wrapped)
   
-  clhs_result <- clhs(covars_df, size = sample_size, cost = "DistRoads", iter = 10000, simple = FALSE, progress = TRUE)
+  clhs_result <- clhs(covars_df, size = sample_size, cost = c("DistRoads"), iter = 10000, simple = FALSE, progress = TRUE)
   
   sample_data <- clhs_result$sampled_data
   
@@ -239,7 +238,7 @@ dist_to_roads <- distance(covars[[1]], roads_vect)
 covars_stack <- c(covars, dist_to_roads)
 covars_df_new <- as.data.frame(covars_stack, xy = TRUE, na.rm = TRUE)
 colnames(covars_df_new)[7] <- "DistRoads"
-
+head(covars_df_new)
 
 ## Function for generating skewed samples - strength is controlled by alpha - not using at this moment
 skewed_sample <- function(alpha = 5, sample_size, agb_wrapped, agb_std_wrapped) {
@@ -300,6 +299,7 @@ pseudo_weight_knn_clac <- function(rep_id, final_sample, agb_wrapped, covars_wra
   
   library(FNN)
   library(terra)
+  library(MASS)
   
   agb <- unwrap(agb_wrapped)
   covars <- unwrap(covars_wrapped)
@@ -371,9 +371,15 @@ pseudo_weight_knn_clac <- function(rep_id, final_sample, agb_wrapped, covars_wra
   # sampling_model <- gam(mem_indicator ~ s(NDVI) + s(EVI) + s(DEM) + s(SLOPE) + s(agb_impute), 
   #                       family = binomial(link = "logit"), data = aux_norm_df, method = "REML")
   
+  gamma_B <- coef(sampling_model)
+  gamma_cov <- vcov(sampling_model)
+  
+  n <- nrow(aux_norm_df)
+  
   non_prob_sample_pred <- final_sample_norm_df
   non_prob_sample_pred$agb_impute <- final_sample_norm_df$AGB
   
+  gamma_sims <- mvrnorm(n = 100, mu = gamma_B, Sigma = gamma_cov)
   
   ## Predicting inclusion probabilities & pseudo weights for the units of the non-probability sample
   final_sample_norm_df$inc_probs <- predict(sampling_model, newdata = non_prob_sample_pred, type = "response")
@@ -381,9 +387,20 @@ pseudo_weight_knn_clac <- function(rep_id, final_sample, agb_wrapped, covars_wra
 
   final_sample_norm_df$pseudo_weights <- 1/final_sample_norm_df$inc_probs
   
+  non_prob_sample_pred$mem_indicator <- 1
+  X_B <- model.matrix(formula, data = non_prob_sample_pred)
+  pseudo_weight_sims <- numeric(100)
+  
+  for (i in seq_len(100)) {
+    gamma_draw <- gamma_sims[i, ]
+    
+    inc_probs_sims <- plogis(X_B %*% gamma_draw)
+    pseudo_weight_sims[i] <- (1/n)*sum(final_sample_norm_df$AGB / inc_probs_sims)
+  }
+  
+  var_comp_gamma <- var(pseudo_weight_sims)
   
   ## HT Estimator
-  n <- nrow(aux_norm_df)
 
   naive_mean <- mean(final_sample_norm_df$AGB)
   pseudo_weight_mean <- (1/n) * sum(final_sample_norm_df$pseudo_weights * final_sample_norm_df$AGB)
@@ -396,7 +413,8 @@ pseudo_weight_knn_clac <- function(rep_id, final_sample, agb_wrapped, covars_wra
   # coverage <- (lower_95ci <= true_mean) & (upper_95ci >= true_mean)
   
   
-  return(list(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, final_sample_norm_df = final_sample_norm_df))
+  return(list(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, final_sample_norm_df = final_sample_norm_df,
+              gamma_B = gamma_B, var_comp_gamma = var_comp_gamma))
   # return(c(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, variance = var_est, std = std_est,
   #          lower_bound = lower_95ci, upper_bound = upper_95ci, coverage = coverage))
   
@@ -483,6 +501,84 @@ pseudo_weight_krige_clac <- function(rep_id, final_sample, agb_wrapped, covars_w
   # return(list(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, final_sample_norm_df = final_sample_norm_df))
   return(c(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, variance = var_est, std = std_est,
            lower_bound = lower_95ci, upper_bound = upper_95ci, coverage = coverage))
+  
+}
+
+pseudo_weight_linReg_clac <- function(rep_id, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean) {
+  
+  library(FNN)
+  library(terra)
+  
+  agb <- unwrap(agb_wrapped)
+  covars <- unwrap(covars_wrapped)
+  
+  extracted <- terra::extract(covars, final_sample[, c("x", "y")])
+  final_sample <- cbind(final_sample, extracted[, covars_names])
+  final_sample <- final_sample[complete.cases(final_sample[, covars_names]), ]##############
+  
+  raw_covars <- final_sample[, covars_names]
+  colnames(raw_covars) <- paste0(covars_names, "_raw")
+  
+  
+  
+  ## Normalizing Covariates for KNN
+  norm_func <- function(df, colnames, min_vals = NULL, max_vals = NULL){
+    for (i in colnames){
+      df[[i]] <- (df[[i]] - min_vals[i])/(max_vals[i] - min_vals[i])
+    }
+    return(df)
+  }
+  
+  B_min <- sapply(final_sample[covars_names], min, na.rm = TRUE)
+  B_max <- sapply(final_sample[covars_names], max, na.rm = TRUE)
+  
+  
+  aux_norm_df <- norm_func(aux_df, covars_names, B_min, B_max)
+  final_sample_norm_df <- norm_func(final_sample, covars_names, B_min, B_max)
+  final_sample_norm_df <- cbind(final_sample_norm_df, raw_covars)
+  
+  
+  ## Creating a membership indicator for units in A
+  aux_norm_df$mem_indicator <- paste(aux_norm_df$x, aux_norm_df$y) %in% paste(final_sample_norm_df$x, final_sample_norm_df$y)
+  
+  lm_formula <- as.formula(paste("AGB ~", paste(covars_names, collapse = " + ")))
+  agb_lm_model <- lm(formula = lm_formula, data = final_sample_norm_df)
+  
+  lm_B <- agb_lm_model$coefficients
+  
+  aux_norm_df$agb_impute <- predict(agb_lm_model, newdata = aux_norm_df)
+  
+  formula <- as.formula(paste("mem_indicator ~ x + y + agb_impute + ", paste(covars_names, collapse = " + ")))
+  
+  ## Logistic regression of the membership indicator
+  sampling_model <- glm(formula, family = binomial(link = "logit"), data = aux_norm_df)
+  # sampling_model <- glm(mem_indicator ~ NDVI + EVI + DEM + SLOPE + CHM + agb_impute, family = binomial(link = "logit"), data = aux_norm_df)
+  # sampling_model <- gam(mem_indicator ~ s(NDVI) + s(EVI) + s(DEM) + s(SLOPE) + s(agb_impute), 
+  #                       family = binomial(link = "logit"), data = aux_norm_df, method = "REML")
+  
+  gamma_B <- coef(sampling_model)
+  
+  non_prob_sample_pred <- final_sample_norm_df
+  non_prob_sample_pred$agb_impute <- final_sample_norm_df$AGB
+  
+  
+  ## Predicting inclusion probabilities & pseudo weights for the units of the non-probability sample
+  final_sample_norm_df$inc_probs <- predict(sampling_model, newdata = non_prob_sample_pred, type = "response")
+  # final_sample_norm_df$inc_probs <- predict(sampling_model, data = non_prob_sample_pred)$predictions[, 2]
+  
+  final_sample_norm_df$pseudo_weights <- 1/final_sample_norm_df$inc_probs
+  
+  
+  ## HT Estimator
+  n <- nrow(aux_norm_df)
+  
+  naive_mean <- mean(final_sample_norm_df$AGB)
+  pseudo_weight_mean <- (1/n) * sum(final_sample_norm_df$pseudo_weights * final_sample_norm_df$AGB)
+  
+  return(list(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, final_sample_norm_df = final_sample_norm_df,
+              gamma_B = gamma_B, lm_B = lm_B))
+  # return(c(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, variance = var_est, std = std_est,
+  #          lower_bound = lower_95ci, upper_bound = upper_95ci, coverage = coverage))
   
 }
 
@@ -591,7 +687,7 @@ pseudo_weight_knn_EL_clac <- function(rep_id, final_sample, agb_wrapped, covars_
   ## Objective function of the EL
   neg_logLik <- function(p) {
     if (any(p <= 0)) return(1e10)
-    term1 <- sample_size * log(sum(p*expected_pseudo_weights))
+    term1 <- sample_size * log(sum(p*pseudo_weights))
     term2 <- sum(log(p))
     -(term1 + term2)
   }
@@ -786,40 +882,6 @@ write.csv(results, "C:/Documents_PhD/Study02/study02_results/study02_results_agb
 results <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_prefSample10_EL_PL.csv")
 
 
-## Accuracy metrics over the MC simulations
-accuracy_metrics <- function(df, pop_mean) {
-  bias_weighted <- mean(df$mu_y_EL, na.rm = TRUE) - pop_mean
-  sd_weighted <- sd(df$mu_y_EL, na.rm = TRUE)
-  rmse_weighted <- sqrt(mean((df$mu_y_EL - pop_mean)^2, na.rm = TRUE))
-  
-  return(data.frame(
-    Bias = bias_weighted,
-    Std = sd_weighted,
-    RMSE = rmse_weighted
-  ))
-}
-
-results_accuracy <- accuracy_metrics(results, true_mean)
-print(results_accuracy)
-
-## Box plots showing naive mean and pseudo-weighted mean
-# plot_df <- data.frame(
-#   estimator = rep(c("naive_mean", "pseudo_weight_mean"), each = nrow(results)),
-#   estimate = c(results$naive_mean, results$pseudo_weight_mean)
-# )
-# 
-# ggplot(plot_df, aes(x = estimator, y = estimate, fill = estimator)) +
-#   geom_violin(alpha = 0.5, trim = FALSE) +
-#   geom_boxplot(width = 0.15, outlier.shape = NA) +
-#   geom_hline(yintercept = true_mean, linetype = "dashed", color = "red") +
-#   scale_x_discrete(labels = c("naive_mean" = "Naive", "pseudo_weight_mean" = "Pseudo-Weighted")) +
-#   labs(title = "Naive vs Pseudo-Weighted Mean Estimator",
-#        subtitle = paste("Dashed line = true mean:", round(true_mean, 2)),
-#        y = "AGB estimate", x = NULL) +
-#   theme_minimal() +
-#   theme(legend.position = "none")
-
-
 plot_df <- data.frame(
   estimator = rep(c("naive_mean", "pseudo_weight_mean", "mu_y_EL"), each = nrow(results)),
   estimate = c(results$naive_mean, results$pseudo_weight_mean, results$mu_y_EL)
@@ -845,12 +907,12 @@ ggplot(plot_df, aes(x = estimator, y = estimate, fill = estimator)) +
 ################################################################################################################
 ## Plots to compare the results between different sampling configurations
 
-exp_resid10_clusSamp <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_clusteredSample_EL.csv")
-exp_resid10_prefSamp05 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_prefSample05_EL.csv")
-exp_resid10_prefSamp10 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_prefSample10_EL.csv")
-exp_resid10_prefSamp15 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_prefSample15_EL.csv")
-exp_resid10_clhsSamp <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_clhsSample_EL.csv")
+exp_resid10_clusSamp <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid30_prefSample05.csv")
+exp_resid10_prefSamp05 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid30_prefSample10.csv")
+exp_resid10_prefSamp10 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid30_prefSampleCovars10.csv")
+exp_resid10_clhsSamp <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_clhsSample.csv")
 
+# exp_resid10_prefSamp15 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_prefSample15_EL.csv")
 # lm_resid10_clusSamp <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_lm_expCorrResid10_clusteredSample.csv")
 # lm_resid10_prefSamp15 <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_agbSimulation_lm_expCorrResid10_prefSample15.csv")
 
@@ -858,55 +920,50 @@ exp_resid10_clhsSamp <- read.csv("C:/Documents_PhD/Study02/study02_results/study
 ## Combined df for different sampling configurations (same underlying AGB)
 plot_df <- bind_rows(
   exp_resid10_clusSamp %>%
-    select(naive_mean, mu_y_EL, pseudo_weight_mean) %>%
+    select(naive_mean, mu_y_EL, pseudo_weight_mean, EL_PL, NewLik) %>%
     pivot_longer(
       cols = everything(),
       names_to = "estimator",
       values_to = "estimate"
     ) %>%
-    mutate(sampling = "Clustered"),
-
-  exp_resid10_clhsSamp %>%
-    select(naive_mean, mu_y_EL, pseudo_weight_mean) %>%
-    pivot_longer(
-      cols = everything(),
-      names_to = "estimator",
-      values_to = "estimate"
-    ) %>%
-    mutate(sampling = "Accessibility cLHS"),
+    mutate(sampling = "Prefrential 0.5"),
   
   exp_resid10_prefSamp05 %>%
-    select(naive_mean, mu_y_EL, pseudo_weight_mean) %>%
+    select(naive_mean, mu_y_EL, pseudo_weight_mean, EL_PL, NewLik) %>%
     pivot_longer(
       cols = everything(),
       names_to = "estimator",
       values_to = "estimate"
     ) %>%
-    mutate(sampling = "Preferential 0.5"),
+    mutate(sampling = "Prefrential 1.0"),
   
   exp_resid10_prefSamp10 %>%
-    select(naive_mean, mu_y_EL, pseudo_weight_mean) %>%
+    select(naive_mean, mu_y_EL, pseudo_weight_mean, EL_PL, NewLik) %>%
     pivot_longer(
       cols = everything(),
       names_to = "estimator",
       values_to = "estimate"
     ) %>%
-    mutate(sampling = "Preferential 1.0")
+    mutate(sampling = "Prefrential, with Covariates 1.0")
 )
 
-plot_df$estimator <- factor(plot_df$estimator, levels = c("naive_mean", "pseudo_weight_mean", "mu_y_EL"))
+plot_df$estimator <- factor(plot_df$estimator, levels = c("naive_mean", "pseudo_weight_mean", "mu_y_EL", "EL_PL", "NewLik"))
+est_labels <- c("naive_mean" = "Naive", "mu_y_EL" = "Hier Wt.", "pseudo_weight_mean" = "Inc Prob Wt.", "EL_PL" = "Prof Lik Wt.", "NewLik" = "Full Lik Wt.")
 
 ## Box plot and violin plot over the MC simulations
-ggplot(plot_df, aes(x = estimator, y = estimate, fill = sampling)) +
+ggplot(plot_df, aes(x = estimator, y = estimate, fill = estimator, color = estimator)) +
   geom_violin(alpha = 0.5, trim = FALSE) +
-  geom_boxplot(width = 0.15, outlier.shape = NA) +
+  geom_jitter(width = 0, alpha = 0.4, size = 2) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "black") +
   geom_hline(yintercept = true_mean, linetype = "dashed", color = "red") +
   facet_wrap(~sampling) +
-  scale_x_discrete(labels = c("naive_mean" = "Naive", "mu_y_EL" = "EL Weighted", "pseudo_weight_mean" = "Inclusion Prob Weighted")) +
+  scale_x_discrete(labels = est_labels) +
+  scale_fill_discrete(labels = est_labels) +
+  scale_color_discrete(labels = est_labels) +
   labs(title = "Naive vs Pseudo-Weighted Mean Estimator",
        subtitle = paste("Dashed line = true mean:", round(true_mean, 2)), ## need to take of the "true_mean" variable
        y = "AGB estimate", x = NULL) +
-  theme_minimal(base_size = 20) +
+  theme_minimal(base_size = 18) +
   theme(
     legend.position = "bottom",
     legend.title = element_blank(),
@@ -915,6 +972,35 @@ ggplot(plot_df, aes(x = estimator, y = estimate, fill = sampling)) +
     axis.text = element_text(face = "bold")
 )
 
+## Accuracy metrics over the MC simulations
+accuracy_metrics <- function(df, pop_mean) {
+  
+  bias_inc <- mean(df$pseudo_weight_mean, na.rm = TRUE) - pop_mean
+  sd_inc <- sd(df$pseudo_weight_mean, na.rm = TRUE)
+  rmse_inc <- sqrt(mean((df$pseudo_weight_mean - pop_mean)^2, na.rm = TRUE))
+  
+  bias_hier <- mean(df$mu_y_EL, na.rm = TRUE) - pop_mean
+  sd_hier <- sd(df$mu_y_EL, na.rm = TRUE)
+  rmse_hier <- sqrt(mean((df$mu_y_EL - pop_mean)^2, na.rm = TRUE))
+  
+  bias_pl <- mean(df$EL_PL, na.rm = TRUE) - pop_mean
+  sd_pl <- sd(df$EL_PL, na.rm = TRUE)
+  rmse_pl <- sqrt(mean((df$EL_PL - pop_mean)^2, na.rm = TRUE))
+  
+  return(data.frame(
+    "Inc Bias" = round(bias_inc, 2),
+    "Inc Std" = round(sd_inc, 2),
+    "Inc RMSE" = round(rmse_inc, 2),
+    
+    "Hier Bias" = round(bias_hier, 2),
+    "Hier Std" = round(sd_hier, 2),
+    "Hier RMSE" = round(rmse_hier, 2),
+    
+    "PL Bias" = round(bias_pl, 2),
+    "PL Std" = round(sd_pl, 2),
+    "PL RMSE" = round(rmse_pl, 2)
+  ))
+}
 
 ## Need to update it manually based on which AGB simulation is being used
 true_mean_lm = 54.23
@@ -925,16 +1011,54 @@ true_mean_exp = 55.68
 exp_resid10_clusSamp_AM <- accuracy_metrics(exp_resid10_clusSamp, pop_mean = true_mean)
 exp_resid10_prefSamp05_AM <- accuracy_metrics(exp_resid10_prefSamp05, pop_mean = true_mean)
 exp_resid10_prefSamp10_AM <- accuracy_metrics(exp_resid10_prefSamp10, pop_mean = true_mean)
-exp_resid10_prefSamp15_AM <- accuracy_metrics(exp_resid10_prefSamp15, pop_mean = true_mean)
+exp_resid10_clhsSamp_AM <- accuracy_metrics(exp_resid10_clhsSamp, pop_mean = true_mean)
 
 
 results_table <- rbind(
-  cbind(Model = "Exp - Strongly Clustered", exp_resid10_clusSamp_AM),
-  cbind(Model = "Exp - Preferential 0.5", exp_resid10_prefSamp05_AM),
-  cbind(Model = "Exp - Preferential 1.0", exp_resid10_prefSamp10_AM),
-  cbind(Model = "Exp - Preferential 1.5", exp_resid10_prefSamp15_AM))
+  cbind("Sample Type" = "Strongly Clustered", exp_resid10_clusSamp_AM),
+  cbind("Sample Type" = "Accessibility cLHS", exp_resid10_clhsSamp_AM),
+  cbind("Sample Type" = "Preferential 0.5", exp_resid10_prefSamp05_AM),
+  cbind("Sample Type" = "Preferential 1.0", exp_resid10_prefSamp10_AM))
 
 print(results_table)
+
+plot_df <- bind_rows(
+  exp_resid10_clusSamp %>%
+    select(naive_mean, mu_y_EL, pseudo_weight_mean, EL_PL) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "estimator",
+      values_to = "estimate"
+    ) %>%
+    mutate(sampling = "Clustered"),
+  
+  exp_resid10_clhsSamp %>%
+    select(naive_mean, mu_y_EL, pseudo_weight_mean, EL_PL) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "estimator",
+      values_to = "estimate"
+    ) %>%
+    mutate(sampling = "Accessibility cLHS"),
+  
+  exp_resid10_prefSamp05 %>%
+    select(naive_mean, mu_y_EL, pseudo_weight_mean, EL_PL) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "estimator",
+      values_to = "estimate"
+    ) %>%
+    mutate(sampling = "Preferential 0.5"),
+  
+  exp_resid10_prefSamp10 %>%
+    select(naive_mean, mu_y_EL, pseudo_weight_mean, EL_PL) %>%
+    pivot_longer(
+      cols = everything(),
+      names_to = "estimator",
+      values_to = "estimate"
+    ) %>%
+    mutate(sampling = "Preferential 1.0")
+)
 ################################################################################################################
 
 ## Testing
@@ -943,7 +1067,7 @@ set.seed(123)
 
 
 ## Drawing an opportunistic sample
-final_prob_sample <- prob_sample(500, agb_wrapped, agb_std_wrapped, covars_wrapped)
+# final_prob_sample <- prob_sample(500, agb_wrapped, agb_std_wrapped, covars_wrapped)
 final_sample_pref <- pref_sample(alpha = 0, beta = 1, sample_size = 500, agb_wrapped, agb_std_wrapped)
 # final_sample_pref <- strongly_clustered_sample(s = 0.90, sample_size = 500, agb_wrapped, strata_IDs)
 # final_sample_pref <- clhs_sample(500, agb_wrapped, covars_df_new)
@@ -955,42 +1079,46 @@ true_mean
 
 ## Calling the function for estimating weights - modelling sampling mechanism and KNN
 pref_weights <- pseudo_weight_knn_clac(1, final_sample_pref, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
-pref_weights <- pseudo_weight_prob_knn_clac(1, final_sample_pref, final_prob_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
+# pref_weights <- pseudo_weight_linReg_clac(1, final_sample_pref, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
+# pref_weights <- pseudo_weight_prob_knn_clac(1, final_sample_pref, final_prob_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
 pref_sample_udpate <- pref_weights$final_sample_norm_df
 
-# cor(pref_sample_udpate, method = "pearson")
 
 summary(lm(AGB ~ NDVI + EVI + DEM + SLOPE, data = pref_sample_udpate))$r.squared
 
-## Regressing pseudo weights for smooth values
-expected_weights_model <- glm(pseudo_weights ~ NDVI + EVI + DEM + SLOPE + AGB, family = Gamma(link = "log"), data = pref_sample_udpate)
-expected_weights_model <- gam(pseudo_weights ~ s(NDVI) + s(EVI) + s(DEM) + s(SLOPE) + s(CHM) + s(MSI) + s(AGB), 
-                              family = Gamma(link = "log"), data = pref_sample_udpate, method = "REML")
 
-
-pref_sample_udpate$expected_pseudo_weights <- predict(expected_weights_model, type = "response")
-
-hist(pref_sample_udpate$expected_pseudo_weights, xlab = "1/Inclusion Probability", main = "")
-hist(pref_sample_udpate$pseudo_weights)
+hist(pref_sample_udpate$pseudo_weights, xlab = "1 / Inc. Prob", main = "")
 
 ## Empirical Likelihood
 sample_size <- nrow(pref_sample_udpate)
 pseudo_weights <- pref_sample_udpate$pseudo_weights
-expected_pseudo_weights <- pref_sample_udpate$expected_pseudo_weights
 
+mean_x_pop <- mean(aux_df$x)
+mean_y_pop <- mean(aux_df$y)
 mean_NDVI_pop <- mean(aux_df$NDVI)
 mean_EVI_pop <- mean(aux_df$EVI)
 mean_DEM_pop <- mean(aux_df$DEM)
 mean_SLOPE_pop <- mean(aux_df$SLOPE)
-# mean_MSI_pop <- mean(aux_df$MSI)
-# mean_CHM_pop <- mean(aux_df$CHM)
+
 
 ## Objective function of the EL
 neg_logLik <- function(p) {
   if (any(p <= 0)) return(1e10)
-  term1 <- sample_size * log(sum(p*expected_pseudo_weights))
+  term1 <- sample_size * log(sum(p*pseudo_weights))
   term2 <- sum(log(p))
   -(term1 + term2)
+}
+
+neg_logLik <- function(p) {
+  if (any(p <= 0)) return(1e10)
+  term1 <- sample_size * log(sum(p*pseudo_weights))
+  term2 <- sum(log(p))
+  -(term1 + term2)
+}
+
+gr_logLik <- function(p) {
+  S <- sum(p*pseudo_weights)
+  -((sample_size*pseudo_weights)/S + 1/p)
 }
 
 ## Equality constraints
@@ -1000,7 +1128,21 @@ heq <- function(p) {
     sum(p * pref_sample_udpate$NDVI_raw) - mean_NDVI_pop,
     sum(p * pref_sample_udpate$EVI_raw) - mean_EVI_pop,
     sum(p * pref_sample_udpate$DEM_raw) - mean_DEM_pop,
-    sum(p * pref_sample_udpate$SLOPE_raw) - mean_SLOPE_pop
+    sum(p * pref_sample_udpate$SLOPE_raw) - mean_SLOPE_pop,
+    sum(p * pref_sample_udpate$x) - mean_x_pop,
+    sum(p * pref_sample_udpate$y) - mean_y_pop
+  )
+}
+
+heq.jac <- function(p) {
+  rbind(
+    rep(1, sample_size),
+    pref_sample_udpate$NDVI_raw,
+    pref_sample_udpate$EVI_raw,
+    pref_sample_udpate$DEM_raw,
+    pref_sample_udpate$SLOPE_raw,
+    pref_sample_udpate$x,
+    pref_sample_udpate$y
   )
 }
 
@@ -1009,28 +1151,55 @@ hin <- function(p) {
   p - 1e-8
 }
 
+hin.jac <- function(p) diag(sample_size)
 
 ## Initializing point masses
 p_init <- rep(1/sample_size, sample_size)
 
 
 ## Augmented Lagrangian - for constrained optimization
-result_EL <- auglag(par = p_init, fn = neg_logLik, heq = heq, hin = hin, 
-                    control.outer = list(trace = FALSE))
+result_EL <- auglag(par = p_init, fn = neg_logLik, gr = gr_logLik,
+                    heq = heq, heq.jac = heq.jac, hin = hin, hin.jac = hin.jac, 
+                    control.outer = list(trace = TRUE))
 
 p_hat <- result_EL$par  #point masses
 
-hist(p_hat)
-
+hist(p_hat, xlab = "Sample Wt (p's): Hier. approach", main = "")
+summary(p_hat)
 ## Mean estimator using the weights
 mu_y_EL <- sum(p_hat * pref_sample_udpate$AGB)
 mu_y_EL
+
+
 
 (mean(pref_sample_udpate$AGB))
 (mean(sum(pref_sample_udpate$AGB * pref_sample_udpate$pseudo_weights)))/nrow(aux_df)
 (mean(agb_df_plot$AGB))
 hist(pref_sample_udpate$AGB)
 hist(agb_df_plot$AGB)
+nrow(aux_df)
+500*sum(p_hat*pref_sample_udpate$inc_probs)
 
+
+
+cal_weights <- pseudo_weights/sum(pseudo_weights)
+
+Z <- cbind(
+  1, pref_sample_udpate$NDVI_raw,
+  pref_sample_udpate$EVI_raw,
+  pref_sample_udpate$DEM_raw,
+  pref_sample_udpate$SLOPE_raw
+)
+
+c_vec <- c(1, mean_NDVI_pop, mean_EVI_pop, mean_DEM_pop, mean_SLOPE_pop)
+
+ZtZinv <- solve(t(Z) %*% Z)
+p_hat_EEL <- as.vector(cal_weights + Z %*% ZtZinv %*% (c_vec - t(Z) %*% cal_weights))
+
+hist(p_hat_EEL)
+mu_y_EEL <- sum(p_hat_EEL * pref_sample_udpate$AGB)
+mu_y_EEL
 ################################################################################################################
-
+library(survey)
+variance <- survey::svyglm()
+?svyglm
