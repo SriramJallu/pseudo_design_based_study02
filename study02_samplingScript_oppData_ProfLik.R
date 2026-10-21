@@ -877,8 +877,12 @@ final_sample_pref_raw <- final_sample_pref
 
 final_sample_pref[colnames(final_sample_pref)] <- scale(final_sample_pref[colnames(final_sample_pref)])
 
-Z_matrix <- as.matrix(cbind(1, final_sample_pref$x, final_sample_pref$y, final_sample_pref$NDVI, final_sample_pref$EVI, 
-  final_sample_pref$DEM, final_sample_pref$SLOPE, final_sample_pref$AGB))
+cols <- c("x", "y", "NDVI", "EVI", "DEM", "SLOPE")
+
+# Z_matrix <- as.matrix(cbind(1, final_sample_pref$x, final_sample_pref$y, final_sample_pref$NDVI, final_sample_pref$EVI, 
+#   final_sample_pref$DEM, final_sample_pref$SLOPE, final_sample_pref$AGB))
+
+Z_matrix <- cbind(1, as.matrix(final_sample_pref[, cols]), AGB = final_sample_pref$AGB)
 
 sample_size <- nrow(final_sample_pref)
 
@@ -886,7 +890,8 @@ mean_pop_NDVI <- mean(aux_df$NDVI)
 mean_pop_EVI <- mean(aux_df$EVI)
 mean_pop_DEM <- mean(aux_df$DEM)
 mean_pop_SLOPE <- mean(aux_df$SLOPE)
-
+mean_pop_x <- mean(aux_df$x)
+mean_pop_y <- mean(aux_df$y)
 
 ## Inclusion probability function, logistic regression cdf, gamma - is the nuisance parameter
 P_i <- function(gamma, Z_matrix) {
@@ -944,7 +949,9 @@ heq <- function(p, ...) {
     sum(p * final_sample_pref_raw$NDVI) - mean_pop_NDVI,
     sum(p * final_sample_pref_raw$EVI) - mean_pop_EVI,
     sum(p * final_sample_pref_raw$DEM) - mean_pop_DEM,
-    sum(p * final_sample_pref_raw$SLOPE) - mean_pop_SLOPE
+    sum(p * final_sample_pref_raw$SLOPE) - mean_pop_SLOPE,
+    sum(p * final_sample_pref_raw$x) - mean_pop_x,
+    sum(p * final_sample_pref_raw$y) - mean_pop_y
   )
 }
 
@@ -954,7 +961,9 @@ heq.jac <- function(p, ...) {
     final_sample_pref_raw$NDVI,
     final_sample_pref_raw$EVI,
     final_sample_pref_raw$DEM,
-    final_sample_pref_raw$SLOPE
+    final_sample_pref_raw$SLOPE,
+    final_sample_pref_raw$x,
+    final_sample_pref_raw$y
   )
 }
 

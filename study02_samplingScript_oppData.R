@@ -1063,7 +1063,7 @@ plot_df <- bind_rows(
 
 ## Testing
 ## Set up for Empirical Likelihood, to estimate point masses (pseudo weights)
-set.seed(123)
+set.seed(1234)
 
 
 ## Drawing an opportunistic sample

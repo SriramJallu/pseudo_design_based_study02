@@ -21,6 +21,12 @@ covars_matched <- mask(covars, common_mask, maskvalue = FALSE)
 writeRaster(agb_matched, "study02_agb_CCI_filtered.tif")
 writeRaster(covars_matched, "study02_env_covariates#4_filtered.tif")
 
+
+agb_cci <- rast("../study02_data/study02_agb_CCI_filtered.tif")
+covars <- rast("../study02_data/study02_env_covariates#4_filtered.tif")
+
+
+# covars <- rast("../study02_data/study02_env_covariates#4.tif")
 normalize <- function(r) {
   r_min <- global(r, "min", na.rm = TRUE)[1, 1]
   r_max <- global(r, "max", na.rm = TRUE)[1, 1]
@@ -33,11 +39,14 @@ NDVI <- normalize(covars$NDVI)
 EVI <- normalize(covars$EVI)
 DEM <- normalize(covars$DEM)
 SLOPE <- normalize(covars$SLOPE)
-
+AGB <- normalize(agb_cci)
 
 ## Simulating AGB Map
 # agb <- 10 + (20*(exp(NDVI))) + (15*(exp(EVI))) - (25*DEM) + (15*SLOPE)
-agb <- 10 + 50*(NDVI) + 50*(EVI) - 20*(DEM) + 40*(SLOPE)
+# agb <- 10 + 50*(NDVI) + 50*(EVI) - 20*(DEM) + 40*(SLOPE)
+agb <- 10 + 50*AGB + (15*(exp(NDVI))) + (10*(exp(EVI))) - (5*DEM) - (5*SLOPE) + 8*(NDVI * EVI) - 8*(DEM * SLOPE)
+summary(agb)
+
 names(agb) <- "AGB"
 hist(agb, na.rm = TRUE)
 global(agb, fun = "mean", na.rm = TRUE)
@@ -50,7 +59,7 @@ hist(agb_df_plot$AGB)
 summary(agb_df_plot$AGB)
 skewness(agb_df_plot$AGB)
 
-# writeRaster(agb, "study02_agb_simulated_lm.tif", overwrite = TRUE)
+writeRaster(agb, "../study02_data/study02_agb_simulated_exp_NDVI_EVI_AGB.tif", overwrite = TRUE)
 
 
 ## Creating a Gaussian Field to add to the AGB map
@@ -120,22 +129,22 @@ ggplot() +
 ## Spatially correlated error simulation
 
 # Prediction grid
-agb <- rast("../study02_data/study02_agb_simulated_exp_NDVI_EVI.tif")
+agb <- rast("../study02_data/study02_agb_simulated_exp_NDVI_EVI_AGB.tif")
 valid_cells <- ifel(is.na(sum(covars)) | is.na(agb), NA, 1)
 
 agb_agg <- aggregate(agb * valid_cells, fact = 10, fun = "mean", na.rm = TRUE)
 names(agb_agg) <- "AGB"
 agb <- agb_agg
-writeRaster(agb, "../study02_data/study02_agg/study02_agb_simulated_exp_NDVI_EVI.tif")
+writeRaster(agb, "../study02_data/study02_agg/study02_agb_simulated_exp_NDVI_EVI_AGB.tif")
 
-agb <- rast("../study02_data/study02_agg/study02_agb_simulated_exp_NDVI_EVI.tif")
+agb <- rast("../study02_data/study02_agg/study02_agb_simulated_exp_NDVI_EVI_AGB.tif")
 pts <- as.data.frame(agb, xy = TRUE, na.rm = FALSE)
 coordinates(pts) <- ~x + y
 
 
 # Variogram model
 vgm_model <- vgm(
-  psill = 30,
+  psill = 180,
   model = "Exp",
   range = 10000,
   nugget = 0
@@ -158,13 +167,13 @@ filtered_sim_df_copy <- filtered_sim_df
 filtered_sim_df_copy$sim1 <- filtered_sim_df_copy$sim1 - mean(filtered_sim_df_copy$sim1, na.rm = TRUE)
 summary(filtered_sim_df_copy)
 write.csv(filtered_sim_df_copy, 
-  "../study02_results/study02_agg/study02_results_expCorrelatedResid_psill30.csv", row.names = FALSE)
+  "../study02_data/study02_agg/study02_results_expCorrelatedResid_psill180_CCI.csv", row.names = FALSE)
 
 
 ## Adding the error with agb df
 
 ## Reading the error csv and convertint to raster
-sim_df <- read.csv("../study02_results/study02_agg/study02_results_expCorrelatedResid_psill30.csv")
+sim_df <- read.csv("../study02_data/study02_agg/study02_results_expCorrelatedResid_psill180_CCI.csv")
 sim_rast <- terra::rast(sim_df[, c("x", "y", "sim1")], type = "xyz") # Not used further
 
 agb_new <- agb
@@ -179,11 +188,11 @@ agb_df_full$AGB <- agb_df_full$AGB_Trend + agb_df_full$sim1
 cells <- cellFromXY(agb_new, as.matrix(agb_df_full[, c("x", "y")]))
 values(agb_new)[cells] <- agb_df_full$AGB
 
-writeRaster(agb_new, "../study02_results/study02_agg/study02_agb_simulated_agg_exp_NDVI_EVI_expCorrResid30.tif", overwrite = TRUE)
+writeRaster(agb_new, "../study02_results/study02_agg/study02_agb_simulated_agg_exp_NDVI_EVI_AGB_expCorrResid180.tif", overwrite = TRUE)
 
 
 ## Checking for variation explaination by LM 
-agb_trend <- rast("../study02_data/study02_agg/study02_agb_simulated_exp_NDVI_EVI.tif")
+agb_trend <- rast("../study02_data/study02_agg/study02_agb_simulated_exp_NDVI_EVI_AGB.tif")
 agb_trend_df <- as.data.frame(agb_trend, xy = TRUE, na.rm = FALSE)
 
 var_agb_trend <- var(agb_trend_df[[3]], na.rm = TRUE)
