@@ -52,7 +52,7 @@ names(covars_agg) <- names(covars)
 # agb_cci <- agb_agg
 covars <- covars_agg
 
-covars <- c(covars, agb_cci)
+# covars <- c(covars, agb_cci)
 aux_df <- as.data.frame(covars, xy = TRUE, na.rm = TRUE)
 
 ## Standardize AGB values
@@ -212,27 +212,33 @@ clhs_sample <- function(sample_size = 500, agb_wrapped, covars_df = covars_df_ne
   
 }
 
-accessibility_sample <- function(sample_size = 500, agb_wrapped, covars_df = covars_df_new, a1 = 1, a2 = 0.5, a3 = 0.5) {
+accessibility_sample <- function(alpha = 0, beta = 1, sample_size = 500, agb_wrapped, dist_std_wrapped) {
   
   agb <- unwrap(agb_wrapped)
-  access_df <- covars_df
-  access_df$DistRoads_s <- scale(access_df$DistRoads)
-  access_df$DEM_s <- scale(access_df$DEM)
-  access_df$SLOPE_s <- scale(access_df$SLOPE)
+  dist_std <- unwrap(dist_std_wrapped)
   
-  access_df$Cost <- a1*access_df$DistRoads_s + a2*access_df$DEM_s + a3*access_df$SLOPE_s
+  lambda <- exp(alpha - beta* dist_std)
+  v <- values(lambda)
   
-  prob <- exp(-access_df$Cost)
-  prob <- prob/sum(prob)
+  scale_factor <- sample_size/sum(v, na.rm = TRUE)
+  lambda_scaled <- lambda * scale_factor
+  lam_values <- values(lambda_scaled)
+  counts <- rep(NA, length(lam_values))
+  valid <- !is.na(lam_values)
   
-  id <- sample(seq(nrow(access_df)), size = sample_size, replace = FALSE, prob = prob)
+  counts[valid] <- rpois(sum(valid), lam_values[valid])
   
-  sample_data <- access_df[id, ]
+  cells_positive <- rep(which(!is.na(counts) & counts > 0))
+  
+  cells <- unlist(
+    lapply(cells_positive, function(i) rep(i, counts[i]))
+  )
+  
+  xy <- xyFromCell(agb, cells)
   
   final_sample <- data.frame(
-    x = sample_data$x,
-    y = sample_data$y,
-    row.names = NULL
+    x = xy[, 1],
+    y = xy[, 2]
   )
   
   final_sample$AGB <- terra::extract(agb, final_sample[, c("x", "y")])[, "AGB"]
@@ -245,13 +251,23 @@ roads <- st_transform(roads, crs(covars))
 roads_vect <- vect(roads)
 
 dist_to_roads <- distance(covars[[1]], roads_vect)
+names(dist_to_roads) <- "DistRoads"
+dist_to_roads <- mask(dist_to_roads, agb)
+
+d_mean <- global(dist_to_roads, "mean", na.rm = TRUE)[1, 1]
+d_sd <- global(dist_to_roads, "sd", na.rm = TRUE)[1, 1]
+dist_std <- (dist_to_roads - d_mean)/d_sd
+names(dist_std) <- "DistRoads_std"
+dist_std_wrapped <- wrap(dist_std)
+
 
 covars_stack <- c(covars, dist_to_roads)
 covars_df_new <- as.data.frame(covars_stack, xy = TRUE, na.rm = TRUE)
 colnames(covars_df_new)[7] <- "DistRoads"
+names(covars_stack)
 
-final_sample <- accessibility_sample(500, agb_wrapped, covars_df_new, 5, 0, 0)
-summary(final_sample)
+
+
 ## Empirical Likelihood implementation, with Profile Likelihood
 pesudo_weight_profileLik <- function(rep_id, final_sample, max_iter, agb_wrapped, covars_wrapped, aux_df) {
   library(FNN)
@@ -416,7 +432,45 @@ pesudo_weight_profileLik <- function(rep_id, final_sample, max_iter, agb_wrapped
   ## Mean estimation using the weights (p_i)
   mu_y_EL <- sum(p_new * final_sample_raw$AGB)
   
-  return(c(rep = rep_id, naive_mean = naive_mean, mu_y_EL = mu_y_EL))
+  ## Variance computation, with Taylor series approximation
+  n_g <- length(gamma_new)
+  n_p <- length(p_new)
+  
+  Pi <- as.vector(P_i(gamma_new, Z_matrix))
+  W <- Pi * (1-Pi)
+  S <- sum(p_new * Pi)
+  a <- as.vector(crossprod(Z_matrix, p_new * W))
+  
+  Hpp <- diag(1/p_new^2) - n*tcrossprod(Pi)/S^2
+  
+  Hpg <- n * (W * Z_matrix / S - tcrossprod(Pi, a)/S^2)
+  Hgp <- t(Hpg)
+  
+  Hgg <- crossprod(Z_matrix, W * Z_matrix) + n *(crossprod(Z_matrix, (p_new * W * (1 - 2 * Pi)) * Z_matrix)/S -
+                                                   tcrossprod(a)/S^2)
+  
+  H_block <- rbind(cbind(Hgg, Hgp), cbind(Hpg, Hpp))
+  H_block <- (H_block + t(H_block))/2
+  
+  Cp <- heq.jac(p_new)
+  Cs <- rbind(Cp[1, ], t(scale(t(Cp[-1, ]))))
+  
+  C <- cbind(matrix(0, nrow(Cs), n_g), Cs)
+  
+  # C <- cbind(matrix(0, nrow(heq.jac(p_new)), n_g), heq.jac(p_new))
+  
+  K <- rbind(cbind(H_block, t(C)),
+             cbind(C, matrix(0, nrow(C), nrow(C))))
+  
+  V <- solve(K)[1:(n_g + n_p), 1: (n_g + n_p)]
+  
+  g_vec <- c(rep(0, n_g), final_sample_raw$AGB)
+  var_mu <- drop(t(g_vec) %*% V %*% g_vec)
+  
+  ci_u <- mu_y_EL + 1.96 * sqrt(var_mu)
+  ci_l <- mu_y_EL - 1.96 * sqrt(var_mu)
+  
+  return(c(rep = rep_id, naive_mean = naive_mean, mu_y_EL = mu_y_EL, var_mu = var_mu, ci_l = ci_l, ci_u = ci_u))
 }
 
 pesudo_weight_profileLik_pop <- function(rep_id, final_sample, max_iter, agb_wrapped, covars_wrapped, aux_df, ture_mean) {
@@ -473,8 +527,7 @@ pesudo_weight_profileLik_pop <- function(rep_id, final_sample, max_iter, agb_wra
   
   
   y_sample <- final_sample$AGB
-  G_grid <- 4000
-  
+
   Pi_Q <- function(gamma, Z_matrix, sub_sample, y_sample) {
     k <- ncol(sub_sample)
     list(
@@ -690,12 +743,12 @@ pesudo_weight_profileLik_pop <- function(rep_id, final_sample, max_iter, agb_wra
     
     p_new <- pmax(p_new, 1e-8)
 
-    mu_PL[iter] <- sum(p_new * final_sample_pref_raw$AGB)
+    mu_hat[iter] <- sum(p_new * final_sample_raw$AGB)
     LL_full[iter] <- full_logLik(gamma_new, p_new)
     
     ## Checking if the change compared to previous iteration is less than set threshold
     if(iter > 1) {
-      delta_mu <- abs(mu_hat[iter] - mu_PL[iter -1])
+      delta_mu <- abs(mu_hat[iter] - mu_hat[iter -1])
       delta_LL <- abs(LL_full[iter] - LL_full[iter - 1])
       delta_p <- max(abs(p_new - p_init))
       delta_gamma <- max(abs(gamma_new - gamma_init))
@@ -771,6 +824,8 @@ pseudo_weight_knn_EL_clac <- function(rep_id, final_sample, agb_wrapped, covars_
   
   library(FNN)
   library(terra)
+  library(alabama)
+  library(lpSolve)
   
   agb <- unwrap(agb_wrapped)
   covars <- unwrap(covars_wrapped)
@@ -858,23 +913,27 @@ pseudo_weight_knn_EL_clac <- function(rep_id, final_sample, agb_wrapped, covars_
   ## Empirical Likelihood
   sample_size <- nrow(final_sample_norm_df)
   pseudo_weights <- final_sample_norm_df$pseudo_weights
+  inc_probs <- final_sample_norm_df$inc_probs
   
   mean_NDVI_pop <- mean(aux_df$NDVI)
   mean_EVI_pop <- mean(aux_df$EVI)
   mean_DEM_pop <- mean(aux_df$DEM)
   mean_SLOPE_pop <- mean(aux_df$SLOPE)
+  mean_x_pop <- mean(aux_df$x)
+  mean_y_pop <- mean(aux_df$y)
+
   
   ## Objective function of the EL
   neg_logLik <- function(p) {
     if (any(p <= 0)) return(1e10)
-    term1 <- sample_size * log(sum(p*pseudo_weights))
+    term1 <- sample_size * log(sum(p/pseudo_weights))
     term2 <- sum(log(p))
-    -(term1 + term2)
+    -(term2 - term1)
   }
   
   gr_logLik <- function(p) {
-    S <- sum(p*pseudo_weights)
-    -((sample_size*pseudo_weights)/S + 1/p)
+    S <- sum(p/pseudo_weights)
+    -(1/p - sample_size/(pseudo_weights*S))
   }
   
   
@@ -885,7 +944,9 @@ pseudo_weight_knn_EL_clac <- function(rep_id, final_sample, agb_wrapped, covars_
       sum(p * final_sample_norm_df$NDVI_raw) - mean_NDVI_pop,
       sum(p * final_sample_norm_df$EVI_raw) - mean_EVI_pop,
       sum(p * final_sample_norm_df$DEM_raw) - mean_DEM_pop,
-      sum(p * final_sample_norm_df$SLOPE_raw) - mean_SLOPE_pop
+      sum(p * final_sample_norm_df$SLOPE_raw) - mean_SLOPE_pop,
+      sum(p * final_sample_norm_df$x) - mean_x_pop,
+      sum(p * final_sample_norm_df$y) - mean_y_pop
     )
   }
   
@@ -895,7 +956,9 @@ pseudo_weight_knn_EL_clac <- function(rep_id, final_sample, agb_wrapped, covars_
       final_sample_norm_df$NDVI_raw,
       final_sample_norm_df$EVI_raw,
       final_sample_norm_df$DEM_raw,
-      final_sample_norm_df$SLOPE_raw
+      final_sample_norm_df$SLOPE_raw,
+      final_sample_norm_df$x,
+      final_sample_norm_df$y
     )
   }
   
@@ -910,19 +973,133 @@ pseudo_weight_knn_EL_clac <- function(rep_id, final_sample, agb_wrapped, covars_
   p_init <- rep(1/sample_size, sample_size)
   
   
-  ## Augmented Lagrangian - for constrained optimization
-  result_EL <- auglag(par = p_init, fn = neg_logLik, gr = gr_logLik, heq = heq, heq.jac = heq.jac,
-                      hin = hin, hin.jac = hin.jac, control.outer = list(trace = FALSE))
+  # ## Augmented Lagrangian - for constrained optimization
+  # result_EL <- auglag(par = p_init, fn = neg_logLik, gr = gr_logLik, heq = heq, heq.jac = heq.jac,
+  #                     hin = hin, hin.jac = hin.jac, control.outer = list(trace = FALSE))
+  # 
+  # p_hat <- result_EL$par  #point masses
+  # 
+  # ## HT estimator using the weights
+  # mu_y_EL <- sum(p_hat * final_sample_norm_df$AGB)
   
-  p_hat <- result_EL$par  #point masses
+  make_constraints <- function(p) {
+    Cp <- heq.jac(p)
+    b <- as.vector(Cp %*% p) - heq(p)
+    m <- rowMeans(Cp[-1, , drop = FALSE])
+    s <- apply(Cp[-1, , drop = FALSE], 1, sd)
+    
+    list(C = rbind(Cp[1, ], (Cp[-1, , drop = FALSE] - m)/s), 
+         b = c(b[1], (b[-1] - m)/s))
+    
+  }
+  
+  interior_start <- function(C, b) {
+    n <- ncol(C)
+    m <- nrow(C)
+    obj  <- c(rep(0, n), 1)
+    A_eq <- cbind(C, 0)
+    A_ge <- cbind(diag(n), -1)
+    sol  <- lp("max", obj, rbind(A_eq, A_ge),
+               c(rep("=", m), rep(">=", n)), c(b, rep(0, n)))
+    list(p = sol$solution[1:n], t = sol$solution[n + 1], status = sol$status)
+  }
+  
+  neg_logLik_p <- function(p, n, Pi) {
+    if (any(p <= 0)) return(1e10)
+    -(sum(log(p)) - n * log(sum(p * Pi)))
+  }
+  
+  newton_method <- function(p, Pi, C, b, n, max_iter = 100, tol = 1e-08) {
+    m  <- nrow(C)
+    np <- length(p)
+    
+    r <- as.vector(C %*% p) - b
+    p <- p - as.vector(crossprod(C, solve(tcrossprod(C), r)))
+    if (any(p <= 0)) stop("start not feasible")
+    F0 <- neg_logLik_p(p, n, Pi)
+    converged <- FALSE
+    
+    for (i in 1:max_iter) {
+      S <- sum(p * Pi)
+      g <- -1 / p + n * Pi / S
+      H <- diag(1 / p^2, np) - n * tcrossprod(Pi) / S^2
+      
+      
+      ridge <- 0
+      repeat {
+        K   <- rbind(cbind(H + diag(ridge, np), t(C)), cbind(C, matrix(0, m, m)))
+        sol <- solve(K, c(-g, rep(0, m)))
+        dp  <- sol[1:np]
+        dec <- -sum(g * dp)
+        if (dec > 0) break
+        ridge <- max(1e-6, ridge * 10)
+        if (ridge > 1e6) stop("no descent direction")
+      }
+      
+      step <- 1
+      if (any(dp < 0)) step <- min(1, 0.95 * min(-p[dp < 0] / dp[dp < 0]))
+      ok <- FALSE
+      repeat {
+        pn <- p + step * dp
+        Fn <- neg_logLik_p(pn, n, Pi)
+        if (is.finite(Fn) && Fn <= F0 - 1e-4 * step * dec) { ok <- TRUE; break }
+        step <- step / 2
+        if (step < 1e-12) break
+      }
+      if (!ok) break
+      p <- pn; F0 <- Fn
+      if (dec / 2 < tol) { converged <- TRUE; break }
+    }
+    list(p = p, value = F0, iter = i, decrement = dec, converged = converged)
+  }
+  
+  con <- make_constraints(p_init)
+  st  <- interior_start(con$C, con$b)
+  
+  p_fit <- newton_method(st$p, inc_probs, con$C, con$b, n = sample_size,
+                         max_iter = 200, tol = 1e-12)
+  p_hat <- p_fit$p
   
   ## HT estimator using the weights
   mu_y_EL <- sum(p_hat * final_sample_norm_df$AGB)
   
+  n <- sample_size
+  y <- final_sample_norm_df$AGB
+  Pi <- inc_probs
+  W <- Pi * (1 - Pi)
+  S <- sum(Pi * p_hat)
+  
+  Z_matrix <- model.matrix(delete.response(terms(sampling_model)), data = non_prob_sample_pred)
+  a <- as.vector(crossprod(Z_matrix, p_hat * W))
+  
+  Hpp <- diag(1/p_hat^2) - n * tcrossprod(Pi)/S^2
+  Hpg <- n * (W * Z_matrix/S - tcrossprod(Pi, a)/S^2)
+  
+  C <- con$C
+  m <- nrow(C)
+  
+  B      <- MASS::Null(t(C))
+  min_ev <- min(eigen(crossprod(B, Hpp %*% B), symmetric = TRUE)$values)
+  
+  Vpp <- solve(rbind(cbind(Hpp, t(C)), cbind(C, matrix(0, m, m))))[1:n, 1:n]
+  J   <- -Vpp %*% Hpg
+  
+  V_gamma <- vcov(sampling_model)
+  var_p   <- drop(t(y) %*% Vpp %*% y)
+  Jy      <- as.vector(crossprod(J, y))
+  var_g   <- drop(t(Jy) %*% V_gamma %*% Jy)
+  var_mu  <- var_p + var_g
+  
+  if (min_ev <= 0 || var_mu <= 0) var_mu <- NA
+  
+  return(c(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean,
+           mu_y_EL = mu_y_EL, var_mu = var_mu, var_p = var_p, var_g = var_g,
+           ci_l = mu_y_EL - 1.96 * sqrt(var_mu), ci_u = mu_y_EL + 1.96 * sqrt(var_mu),
+           min_ev = min_ev))
   
   # return(list(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, mu_y_EL = mu_y_EL,
   #             final_sample_norm_df = final_sample_norm_df))
-  return(c(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, mu_y_EL = mu_y_EL))
+  # return(c(rep = rep_id, naive_mean = naive_mean, pseudo_weight_mean = pseudo_weight_mean, mu_y_EL = mu_y_EL))
   
 }
 
@@ -938,20 +1115,21 @@ set.seed(123)
 results_list <- future_lapply(
   1:mc_reps,
   function(r) {
-    final_sample <- pref_sample(alpha = 0, beta = 0.5, sample_size = sample_size, agb_wrapped, agb_std_wrapped)
+    # final_sample <- pref_sample(alpha = 0, beta = 1, sample_size = sample_size, agb_wrapped, agb_std_wrapped)
+    final_sample <- accessibility_sample(alpha = 10, beta = 20, sample_size = sample_size, agb_wrapped, dist_std_wrapped)
     # final_sample <- pref_resp_covar_sample(alpha = 0, beta0 = 1, beta1 = 0.5, sample_size = 500, agb_wrapped, agb_std_wrapped, covars_std_wrapped)
     # final_sample <- strongly_clustered_sample(s = 0.9, sample_size, agb_wrapped, strata_IDs)
     # final_sample <- clhs_sample(sample_size = sample_size, agb_wrapped, covars_df = covars_df_new)
     # result <- pesudo_weight_profileLik(r, final_sample, max_iter = 10, agb_wrapped, covars_wrapped, aux_df)
-    # result <- pseudo_weight_knn_EL_clac(r, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
+    result <- pseudo_weight_knn_EL_clac(r, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
     # result <- pesudo_weight_profileLik_pop(r, final_sample, max_iter = 5, agb_wrapped, covars_wrapped, aux_df, true_mean)
-    result <- tryCatch(
-      pesudo_weight_profileLik_pop(r, final_sample, max_iter = 15, agb_wrapped, covars_wrapped, aux_df, ture_mean),
-      error = function(e) {
-        cat(sprintf("MC iter %d failed: %s\n", r, conditionMessage(e)),
-            file = "progress_log.txt", append = TRUE)
-        c(rep = r, naive_mean = NA, mu_y_EL = NA)
-      })
+    # result <- tryCatch(
+    #   pesudo_weight_profileLik_pop(r, final_sample, max_iter = 20, agb_wrapped, covars_wrapped, aux_df, ture_mean),
+    #   error = function(e) {
+    #     cat(sprintf("MC iter %d failed: %s\n", r, conditionMessage(e)),
+    #         file = "progress_log.txt", append = TRUE)
+    #     c(rep = r, naive_mean = NA, mu_y_EL = NA)
+    #   })
 
     cat(sprintf("MC iter %d done | naive_mean = %.3f | mu_y_EL = %.3f | var = %.3f | ci_l = %.3f | ci_u = %.3f\n",
                 r, result["naive_mean"], result["mu_y_EL"], result["var_mu"], result["ci_l"], result["ci_u"]),
@@ -959,6 +1137,12 @@ results_list <- future_lapply(
     result
     
     # cat(sprintf("MC iter %d done\n", r), file = "progress_log.txt", append = TRUE)
+    
+    # cat(sprintf("MC iter %d done | naive_mean = %.3f | mu_y_EL = %.3f | pseudo_weight_mean = %.3f | var_mu = %.3f\n",
+    #             r, result["naive_mean"], result["mu_y_EL"], result["pseudo_weight_mean"], result["var_mu"]),
+    #     file = "progress_log.txt", append = TRUE)
+    result
+    
     # final_sample
     },
   future.seed = TRUE
@@ -968,8 +1152,8 @@ plan(sequential)
 
 results <- as.data.frame(do.call(rbind, results_list))
 
-write.csv(results, "C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_AGB_expCorrResid180_prefSample05_NewLik_var.csv", row.names = FALSE)
-results <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_expCorrResid150_prefSample05_NewLik_var.csv")
+write.csv(results, "C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_AGB_expCorrResid180_acessSample_EL_var.csv", row.names = FALSE)
+results <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_AGB_expCorrResid180_prefSample10_EL_var.csv")
 
 head(results)
 
@@ -1016,14 +1200,19 @@ results_accuracy <- accuracy_metrics(results, true_mean)
 results_accuracy
 ####################TRUE#####################################################################
 ## Profile Likelihood Testing
-set.seed(12345)
-final_sample_pref <- pref_sample(0, 1, 500, agb_wrapped, agb_std_wrapped)
-# final_sample_pref <- pref_resp_covar_sample(alpha = 0, beta0 = 1, beta1 = 0.5, sample_size = 500, agb_wrapped, agb_std_wrapped, covars_std_wrapped)
+set.seed(123)
+# final_sample_pref <- pref_sample(0, 1, 500, agb_wrapped, agb_std_wrapped)
+# final_sample_pref <- accessibility_sample(alpha = 10, beta = 20, sample_size = 500, agb_wrapped, dist_std_wrapped)
+final_sample_pref <- pref_resp_covar_sample(alpha = 0, beta0 = 1, beta1 = 0.5, sample_size = 500, agb_wrapped, agb_std_wrapped, covars_std_wrapped)
 # final_sample_pref <- strongly_clustered_sample(s = 0.9, 500, agb_wrapped, strata_IDs)
 # final_sample_pref <- clhs_sample(500, agb_wrapped, covars_df_new)
 # final_sample_pref <- results_list[[1]]
 
 final_sample_pref_sf <- st_as_sf(final_sample_pref, coords = c("x", "y"), crs = crs(covars))
+
+# plot(agb)
+# plot(final_sample_pref_sf, add = TRUE, pch = 16, col = "red")
+# plot(roads_vect, add = TRUE, lwd = 2)
 
 covar_vals <- extract(covars, final_sample_pref[, c("x", "y")])
 final_sample_pref <- cbind(final_sample_pref, covar_vals[, -1])
@@ -1031,8 +1220,9 @@ final_sample_pref_raw <- final_sample_pref
 
 final_sample_pref[colnames(final_sample_pref)] <- scale(final_sample_pref[colnames(final_sample_pref)])
 
+cols <- c("x", "y", "EVI", "SLOPE")
 # cols <- c("x", "y", "NDVI", "EVI", "DEM", "SLOPE")
-cols <- c("x", "y", "NDVI", "EVI", "DEM", "SLOPE")
+# cols <- c("x", "y", "NDVI", "EVI", "DEM", "SLOPE", "DistRoads")
 
 # Z_matrix <- as.matrix(cbind(1, final_sample_pref$x, final_sample_pref$y, final_sample_pref$NDVI, final_sample_pref$EVI,
 #   final_sample_pref$DEM, final_sample_pref$SLOPE, final_sample_pref$AGB))
@@ -1049,6 +1239,9 @@ mean_pop_SLOPE <- mean(aux_df$SLOPE)
 mean_pop_x <- mean(aux_df$x)
 mean_pop_y <- mean(aux_df$y)
 
+mean_pop_NDVI2 <- mean(aux_df$NDVI^2)
+mean_pop_EVI2 <- mean(aux_df$EVI^2)
+
 
 mean_cols <- colMeans(final_sample_pref_raw[, cols])
 std_cols <- apply(final_sample_pref_raw[, cols], 2, sd)
@@ -1062,6 +1255,7 @@ std_cols <- apply(final_sample_pref_raw[, cols], 2, sd)
 # wn <- nrow(aux_norm_df)t <- nrow(non_sampled_units)/5000
 wt <- 1
 
+# aux_df <- as.data.frame(covars_stack, xy = TRUE, na.rm = TRUE) ### This needs changing when incorporating in the Function
 
 sample_key <- paste(final_sample_pref_raw$x, final_sample_pref_raw$y)
 non_sample_key <- paste(aux_df$x, aux_df$y)
@@ -1225,24 +1419,28 @@ gradient_neg_logLik_p <- function(p, Q, wt) {
 heq <- function(p, ...) {
   c(
     sum(p) - 1,
-    sum(p * final_sample_pref_raw$NDVI) - mean_pop_NDVI,
+    # sum(p * final_sample_pref_raw$NDVI) - mean_pop_NDVI,
     sum(p * final_sample_pref_raw$EVI) - mean_pop_EVI,
-    sum(p * final_sample_pref_raw$DEM) - mean_pop_DEM,
+    # sum(p * final_sample_pref_raw$DEM) - mean_pop_DEM,
     sum(p * final_sample_pref_raw$SLOPE) - mean_pop_SLOPE,
     sum(p * final_sample_pref_raw$x) -  mean_pop_x,
-    sum(p * final_sample_pref_raw$y) - mean_pop_y
+    sum(p * final_sample_pref_raw$y) - mean_pop_y,
+    sum(p * final_sample_pref_raw$NDVI^2) - mean_pop_NDVI2,
+    sum(p * final_sample_pref_raw$EVI^2) - mean_pop_EVI2
   )
 }
 
 heq.jac <- function(p, ...) {
   rbind(
     rep(1, length(p)),
-    final_sample_pref_raw$NDVI,
+    # final_sample_pref_raw$NDVI,
     final_sample_pref_raw$EVI,
-    final_sample_pref_raw$DEM,
+    # final_sample_pref_raw$DEM,
     final_sample_pref_raw$SLOPE,
     final_sample_pref_raw$x,
-    final_sample_pref_raw$y
+    final_sample_pref_raw$y,
+    final_sample_pref_raw$NDVI^2,
+    final_sample_pref_raw$EVI^2
   )
 }
 
@@ -1317,7 +1515,7 @@ tol_mu <- 1e-3      ## Threshold for stopping when convergence is achieved
 tol_LL <- 1e-3
 tol_gamma <- 1e-4
 tol_p <- 1e-5
-max_iter <- 20
+max_iter <- 30
 
 ## Storing maximum change in p and gamma values, log-Likelihoods of gamma and p 
 p_change <- numeric(max_iter)
@@ -1408,11 +1606,12 @@ system.time(for (iter in 1:max_iter) {
   p_new <- pmax(p_new, 1e-8)
 
   cat("iter", iter, "p_i optim done", "\n")
-
   
-
+  delta_p <- max(abs(p_new - p_init))
+  delta_gamma <- max(abs(gamma_new - gamma_init))
+  
   cat("iter", iter, "| delta p =", delta_p, "| delta gamma =", delta_gamma, "\n")
-
+  
   p_change[iter] <- delta_p
   gamma_change[iter] <- delta_gamma
 
@@ -1425,8 +1624,6 @@ system.time(for (iter in 1:max_iter) {
   if(iter > 1) {
     delta_mu <- abs(mu_PL[iter] - mu_PL[iter -1])
     delta_LL <- abs(LL_full[iter] - LL_full[iter - 1])
-    delta_p <- max(abs(p_new - p_init))
-    delta_gamma <- max(abs(gamma_new - gamma_init))
     if (delta_mu < tol_mu && delta_LL < tol_LL && delta_gamma < tol_gamma && delta_p < tol_p) {
       cat("Converged at iteration: ", iter, "\n")
       break
@@ -1452,143 +1649,6 @@ agb <- final_sample_pref_raw$AGB
 mu_hat <- sum(agb* p_hat)
 
 
-
-mu_hat_ll <- full_logLik(gamma_hat, p_hat)
-cutoff <- mu_hat_ll - qchisq(0.95, 1)/2
-
-make_constraints_mu <- function(p, mu, agb) {
-  con <- make_constraints(p)
-  m <- mean(agb)
-  s <- sd(agb)
-  list(C = rbind(con$C, (agb - m)/s), 
-       b = c(con$b, (mu - m)/s))
-}
-
-start_p <- function(C, b, p) {
-  r <- as.vector(C %*% p) - b
-  p0 <- p - as.vector(crossprod(C, solve(tcrossprod(C), r)))
-  if (all(p0 > 0)) return(p0)
-  st <- interior_start(C, b)
-  if (st$status == 0 && st$t > 1e-06) return(st$p)
-}
-
-
-fit_at_mu <- function(mu0, refit_gamma = TRUE, g = gamma_hat, p = p_hat, max_iter = 15, threshold = 1e-05) {
-  con <- make_constraints_mu(p_hat, mu0, agb)
-  p <- start_p(con$C, con$b, p_hat)
-  if (is.null(p)) return(list(feasible = FALSE))
-  
-  g <- gamma_hat
-  old_ll <- -Inf
-  
-  for (i in 1:max_iter) {
-    
-    if (refit_gamma) {
-      ## Gamma optimization
-      gamma_fit <- optim(
-        par = g,
-        fn = neg_logLik_gamma,
-        gr = gradient_neg_logLik_gamma,
-        Z_matrix = Z_matrix,
-        sub_sample = sub_sample,
-        y_sample = y_sample,
-        p = p,
-        sample_size = sample_size,
-        wt = wt,
-        method = "BFGS",
-        control = list(maxit = 200)
-      )
-      g <- gamma_fit$par
-    }
-    
-
-    pq <- Pi_Q(g, Z_matrix, sub_sample, y_sample)
-    # ## p Optimization
-    # p_fit <- auglag(
-    #   par = p,
-    #   fn = neg_logLik_p,
-    #   gr = gradient_neg_logLik_p,
-    #   Q = pq$Q,
-    #   Pi = pq$Pi,
-    #   sample_size = sample_size,
-    #   wt = wt,
-    #   heq = heq_mu,
-    #   heq.jac = heq.jac_mu,
-    #   hin = hin,
-    #   hin.jac = hin.jac
-    # )
-    
-    p_fit <- newton_method(p, pq$Q, con$C, con$b, wt)
-    
-    p <- p_fit$p
-    
-    ll <- full_logLik(g, p)
-    if(!refit_gamma || abs(ll - old_ll) < threshold) break
-    old_ll <- ll
-    
-  }
-  
-  list(iter = i, ll = ll, mean_bias = sum(p * agb) - mu0, feasible = TRUE)
-}
-
-f <- function(mu0, refit_gamma = TRUE) {
-  r <- fit_at_mu(mu0, refit_gamma)
-  
-  if(!r$feasible) return(-100)
-  r$ll - cutoff
-}
-
-system.time(r <- fit_at_mu(mu_hat))
-c(f = r$ll - cutoff, bias = r$mean_bias, iter = r$iter)
-
-test_mus <- mu_hat + c(-3, -2, -1, -0.5, 0.5, 1, 2, 3)
-cbind(mu0 = test_mus, f = sapply(test_mus, f, refit_gamma = FALSE))
-
-f_frozen <- function(mu) f(mu, refit_gamma = FALSE)
-lower_fz <- uniroot(f_frozen, c(mu_hat - 2, mu_hat - 1),
-                    f.lower = -2.2173613, f.upper = 0.8263768, tol = 0.001)$root
-upper_fz <- uniroot(f_frozen, c(mu_hat + 1, mu_hat + 2),
-                    f.lower = 0.6914238, f.upper = -3.2830270, tol = 0.001)$root
-
-f_logging <- function(mu0) {
-  t0 <- Sys.time()
-  val <- f(mu0)
-  secs <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
-  line <- sprintf("[%s] mu0 = %.3f || f = %+.4f || (%.0f s)",
-                  format(Sys.time(), "%H:%M:%S"), mu0, val, secs)
-  cat(line, "\n")
-  cat(line, "\n", file = "profile_log_CI.txt", append = TRUE)
-  val
-}
-
-f_full <- function(mu0) f(mu0, refit_gamma = TRUE)
-lower_full <- uniroot(f_logging, c(mu_hat - 3, lower_fz), tol = 0.01, maxiter = 20)$root
-upper_full <- uniroot(f_logging, c(upper_fz, mu_hat + 3), tol = 0.01, maxiter = 20)$root
-c(lower_full, upper_full)
-
-
-full_logLik <- function(optim_params, Z_matrix, sub_sample, y_sample, wt){
-  gamma_optim <- optim_params[1:n_g]
-  p_optim <- optim_params[(n_g + 1):(n_g + n_p)]
-  pq <- Pi_Q(gamma_optim, Z_matrix, sub_sample, y_sample)
-  h <- as.vector(pq$Q %*% p_optim)
-  
-  -(sum(log(pq$Pi)) + sum(log(p_optim)) + sum(log(h)))
-}
-
-full_gradient <- function(optim_params, Z_matrix, sub_sample, y_sample, wt){
-  gamma_optim <- optim_params[1:n_g]
-  p_optim <- optim_params[(n_g + 1):(n_g + n_p)]
-  pq <- Pi_Q(gamma_optim, Z_matrix, sub_sample, y_sample)
-  
-  gamma_grad <- gradient_neg_logLik_gamma(gamma_optim, Z_matrix, sub_sample, p_optim, y_sample, sample_size, wt)
-  p_grad <- gradient_neg_logLik_p(p_optim, pq$Q, pq$Pi, sample_size, wt)
-  
-  c(gamma_grad, p_grad)
-}
-
-k <- ncol(sub_sample)
-Q <- plogis(-outer(as.vector(sub_sample %*% gamma_hat[1:k]), gamma_hat[k + 1] * y_sample, "+"))
 
 pq <- Pi_Q(gamma_hat, Z_matrix, sub_sample, y_sample)
 Q <- pq$Q
@@ -1635,8 +1695,8 @@ H_block <- (H_block + t(H_block))/2
 
 Cp <- heq.jac(p_hat)
 Cs <- rbind(Cp[1, ], t(scale(t(Cp[-1, ]))))
-
 C  <- cbind(matrix(0, nrow(Cs), n_g), Cs)
+
 
 K <- rbind(cbind(H_block, t(C)),
            cbind(C, matrix(0, nrow(C), nrow(C))))
@@ -1646,6 +1706,7 @@ V <- solve(K)[1:(n_g + n_p), 1: (n_g + n_p)]
 g_vec <- c(rep(0, n_g), final_sample_pref_raw$AGB)
 mu_hat <- sum(p_hat*final_sample_pref_raw$AGB)
 var_mu <- drop(t(g_vec) %*% V %*% g_vec)
+var_mu
 
 mu_hat + 1.96 * sqrt(var_mu)
 mu_hat - 1.96 * sqrt(var_mu)

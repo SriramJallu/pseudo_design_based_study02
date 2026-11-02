@@ -80,45 +80,6 @@ covars_std_wrapped <- wrap(covars_std)
   return(final_sample)
 # }
 
-pref_sample <- function(alpha = 0, beta0 = 1, beta1 = 1, sample_size, agb_wrapped, agb_std_wrapped, covars_wrapped) {
-  
-  agb <- unwrap(agb_wrapped)
-  agb_std <- unwrap(agb_std_wrapped)
-  covars <- unwrap(covars_wrapped)
-  
-  ## Sampling Intensity - based on the Response
-  lambda <- exp(alpha + beta0 * agb_std + beta1 * covars[[1]] + beta1 * covars[[2]] + beta1 * covars[[3]] + beta1 * covars[[4]])
-  v <- values(lambda)
-  expected_n <- sample_size
-  
-  scale_factor <- expected_n/sum(v, na.rm = TRUE)
-  lambda_scaled <- lambda * scale_factor
-  lam_values <- values(lambda_scaled)
-  counts <- rep(NA, length(lam_values))
-  valid <- !is.na(lam_values)
-  
-  counts[valid] <- rpois(sum(valid), lam_values[valid])
-  
-  cells_positive <- rep(which(!is.na(counts) & counts > 0))
-  
-  cells <- unlist(
-    lapply(cells_positive, function(i) rep(i, counts[i]))
-  )
-  
-  
-  ## Extracting XY and AGB values for the points
-  xy <- xyFromCell(agb, cells)
-  
-  final_sample <- data.frame(
-    x = xy[, 1],
-    y = xy[, 2]
-  )
-  
-  final_sample$AGB <- terra::extract(agb, final_sample[, c("x", "y")])[, "AGB"]
-  
-  return(final_sample)
-}
-
 pref_resp_covar_sample <- function(alpha = 0, beta0 = 1, beta1 = 1, sample_size, agb_wrapped, agb_std_wrapped, covars_std_wrapped) {
   
   agb <- unwrap(agb_wrapped)
@@ -795,19 +756,19 @@ results <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_results_ag
 
 ## Box plots
 plot_df <- data.frame(
-  estimator = rep(c("naive_mean", "pseudo_weight_mean", "mu_y_EL", "EL_PL", "NewLik"), each = nrow(results)),
-  estimate = c(results$naive_mean, results$pseudo_weight_mean, results$mu_y_EL, results$EL_PL, results$NewLik)
+  estimator = rep(c("naive_mean", "pseudo_weight_mean", "mu_y_EL"), each = nrow(results)),
+  estimate = c(results$naive_mean, results$pseudo_weight_mean, results$mu_y_EL)
 )
 
-plot_df$estimator <- factor(plot_df$estimator, levels = c("naive_mean", "pseudo_weight_mean", "mu_y_EL", "EL_PL", "NewLik"))
+plot_df$estimator <- factor(plot_df$estimator, levels = c("naive_mean", "pseudo_weight_mean", "mu_y_EL"))
 
 ggplot(plot_df, aes(x = estimator, y = estimate, fill = estimator)) +
-  # geom_violin(alpha = 0.5, trim = FALSE) +
+  geom_violin(alpha = 0.5, trim = FALSE) +
   geom_jitter(aes(color = estimator), width = 0, alpha = 0.4, size = 2) +
   geom_boxplot(width = 0.15, outlier.shape = NA) +
   geom_hline(yintercept = true_mean, linetype = "dashed", color = "red") +
   scale_x_discrete(labels = c("naive_mean" = "Naive", "pseudo_weight_mean" = "Inc. Prob", 
-                              "mu_y_EL" = "Hierar Wt", "EL_PL" = "Prof Lik Wt.", "NewLik" = "New Lik Wt")) +
+                              "mu_y_EL" = "Hierar Wt")) +
   labs(title = "Naive, EL Mean Estimator",
        subtitle = paste("Dashed line = true mean:", round(true_mean, 2)),
        y = "AGB estimate", x = NULL) +
@@ -861,15 +822,15 @@ results$NewLik <- results3$mu_y_EL
 ####################TRUE#####################################################################
 ## Profile Likelihood Testing
 set.seed(123)
-final_sample_pref <- pref_sample(0, 1, 1, 500, agb_wrapped, agb_std_wrapped, covars_wrapped)
-final_sample_pref <- final_sample
+final_sample_pref <- pref_sample(0, 1, 500, agb_wrapped, agb_std_wrapped)
+# final_sample_pref <- final_sample
 # final_sample_pref <- strongly_clustered_sample(s = 0.9, 500, agb_wrapped, strata_IDs)
 # final_sample_pref <- final_sample_pref[, c(1, 2, 4)]
 
 final_sample_pref_sf <- st_as_sf(final_sample_pref, coords = c("x", "y"), crs = crs(covars))
 # summary(final_sample_pref)
-plot(agb, main = "Preferential, with Covariates 1.0")
-plot(final_sample_pref_sf, pch = 16, col = "red", add = TRUE)
+# plot(agb, main = "Preferential, with Covariates 1.0")
+# plot(final_sample_pref_sf, pch = 16, col = "red", add = TRUE)
 
 covar_vals <- extract(covars, final_sample_pref[, c("x", "y")])
 final_sample_pref <- cbind(final_sample_pref, covar_vals[, -1])
@@ -892,6 +853,9 @@ mean_pop_DEM <- mean(aux_df$DEM)
 mean_pop_SLOPE <- mean(aux_df$SLOPE)
 mean_pop_x <- mean(aux_df$x)
 mean_pop_y <- mean(aux_df$y)
+mean_pop_NDVI2 <- mean(aux_df$NDVI^2)
+mean_pop_EVI2 <- mean(aux_df$EVI^2)
+
 
 ## Inclusion probability function, logistic regression cdf, gamma - is the nuisance parameter
 P_i <- function(gamma, Z_matrix) {
@@ -916,26 +880,21 @@ gradient_neg_logLik_gamma <- function(gamma, Z_matrix, p, sample_size) {
   Pi <- as.vector(P_i(gamma, Z_matrix))
   
   S <- sum(Pi*p)
-  -(crossprod(Z_matrix, 1 - Pi) - sample_size*crossprod(Z_matrix, p*Pi*(1-Pi))/S)
+  -(as.vector(crossprod(Z_matrix, 1 - Pi)) - sample_size*as.vector(crossprod(Z_matrix, p*Pi*(1-Pi)))/S)
 }
 
 
 ## Likelihood for p_i optimization, where Gamma is assumed to be known
-neg_logLik_p <- function(p, sample_size, gamma, Z_matrix) {
+neg_logLik_p <- function(p, sample_size, Pi) {
   
   if (any(p <= 0)) return(1e10)
-  
-  Pi <- P_i(gamma, Z_matrix)
   
   term1 <- sample_size * log(sum(p*Pi))
   term2 <- sum(log(p))
   -(term2 - term1)
 }
 
-gradient_neg_logLik_p <- function(p, sample_size, gamma, Z_matrix) {
-  
-  Pi <- P_i(gamma, Z_matrix)
-  
+gradient_neg_logLik_p <- function(p, sample_size, Pi) {
   S <- sum(p*Pi)
   
   -(1/p - sample_size*Pi/S)
@@ -952,6 +911,8 @@ heq <- function(p, ...) {
     sum(p * final_sample_pref_raw$SLOPE) - mean_pop_SLOPE,
     sum(p * final_sample_pref_raw$x) - mean_pop_x,
     sum(p * final_sample_pref_raw$y) - mean_pop_y
+    # sum(p * final_sample_pref_raw$NDVI^2) - mean_pop_NDVI2,
+    # sum(p * final_sample_pref_raw$EVI^2) - mean_pop_EVI2
   )
 }
 
@@ -964,6 +925,8 @@ heq.jac <- function(p, ...) {
     final_sample_pref_raw$SLOPE,
     final_sample_pref_raw$x,
     final_sample_pref_raw$y
+    # final_sample_pref_raw$NDVI^2,
+    # final_sample_pref_raw$EVI^2
   )
 }
 
@@ -975,6 +938,55 @@ hin <- function(p, ...) {
 
 hin.jac <- function(p, ...) diag(length(p))
 
+full_logLik <- function(gamma, p){
+  Pi <- as.vector(P_i(gamma, Z_matrix))
+  sum(log(Pi)) + sum(log(p)) - sample_size * log(sum(p * Pi))
+}
+
+make_constraints <- function(p) {
+  Cp <- heq.jac(p)
+  b <- as.vector(Cp %*% p) - heq(p)
+  m <- rowMeans(Cp[-1, , drop = FALSE])
+  s <- apply(Cp[-1, , drop = FALSE], 1, sd)
+  
+  list(C = rbind(Cp[1, ], (Cp[-1, , drop = FALSE] - m)/s), 
+       b = c(b[1], (b[-1] - m)/s))
+  
+}
+
+newton_method <- function(p, Pi, C, b, n, max_iter = 100, tol = 1e-08){
+  m <- nrow(C)
+  
+  r <- as.vector(C %*% p) - b
+  p <- p - as.vector(crossprod(C, solve(tcrossprod(C), r)))
+  stopifnot(all(p > 0))
+  F0 <- neg_logLik_p(p, n, Pi)
+  
+  for (i in 1:max_iter) {
+    S <- sum(p * Pi)
+    g <- -1/p + n * Pi/S
+    H <- diag(1/p^2, length(p)) - n * tcrossprod(Pi)/S^2
+    
+    sol <- solve(rbind(cbind(H, t(C)), cbind(C, matrix(0, m, m))), c(-g, rep(0, m)))
+    dp <- sol[seq_along(p)]
+    dec <- -sum(g * dp)
+    
+    t <- 1
+    if (any(dp < 0)) t <- min(1, 0.95 * min(-p[dp < 0]/dp[dp < 0]))
+    repeat {
+      pn <- p + t * dp
+      Fn <- neg_logLik_p(pn, n, Pi)
+      if (is.finite(Fn) && Fn <= F0 - 1e-04*t*dec) break
+      t <- t /2
+      if (t < 1e-12) break
+    }
+    p <- pn
+    F0 <- Fn
+    if (dec/2 < tol) break
+  }
+  list(p = p, value = F0, iter = i, decrement = dec)
+}
+
 ## Initialize gamma and p values for optimization
 set.seed(123)
 gamma_init <- rnorm(ncol(Z_matrix), mean = 0, sd = 0.01)
@@ -983,7 +995,11 @@ gamma_init <- rnorm(ncol(Z_matrix), mean = 0, sd = 0.01)
 p_init <- rep(1/sample_size, sample_size)
 
 threshold <- 1e-06      ## Threshold for stopping when convergence is achieved
-max_iter <- 10
+tol_mu <- 1e-3      ## Threshold for stopping when convergence is achieved
+tol_LL <- 1e-3
+tol_gamma <- 1e-4
+tol_p <- 1e-5
+max_iter <- 20
 
 ## Storing maximum change in p and gamma values, log-Likelihoods of gamma and p 
 p_change <- numeric(max_iter)
@@ -991,6 +1007,26 @@ gamma_change <- numeric(max_iter)
 LL_gamma <- numeric(max_iter)
 LL_p <- numeric(max_iter)
 mu_PL <- numeric(max_iter)
+LL_full <- numeric(max_iter)
+
+
+interior_start <- function(C, b) {
+  n <- ncol(C)
+  m <- nrow(C)
+  obj  <- c(rep(0, n), 1)
+  A_eq <- cbind(C, 0)
+  A_ge <- cbind(diag(n), -1)
+  sol  <- lp("max", obj, rbind(A_eq, A_ge),
+             c(rep("=", m), rep(">=", n)), c(b, rep(0, n)))
+  list(p = sol$solution[1:n], t = sol$solution[n + 1], status = sol$status)
+}
+
+con <- make_constraints(p_init)
+st  <- interior_start(con$C, con$b)
+c(status = st$status, t = st$t, uniform = 1 / sample_size)
+
+p_init <- st$p
+
 
 ## Optimization loop
 for (iter in 1:max_iter) {
@@ -1001,10 +1037,12 @@ for (iter in 1:max_iter) {
   gamma_fit <- optim(
     par = gamma_init,
     fn = neg_logLik_gamma,
+    gr = gradient_neg_logLik_gamma,
     Z_matrix = Z_matrix,
     p = p_init,
     sample_size = sample_size,
-    method = "BFGS"
+    method = "BFGS",
+    control = list(maxit = 2000, reltol = 1e-14)
   )
 
   gamma_new <- gamma_fit$par
@@ -1015,20 +1053,25 @@ for (iter in 1:max_iter) {
   cat("iter", iter, "Gamma optim done", "\n")
 
   ## p Optimization
-  p_fit <- auglag(
-    par = p_init,
-    fn = neg_logLik_p,
-    gr = gradient_neg_logLik_p,
-    gamma = gamma_new,
-    Z_matrix = Z_matrix,
-    sample_size = sample_size,
-    heq = heq,
-    heq.jac = heq.jac,
-    hin = hin,
-    hin.jac = hin.jac
-  )
+  Pi <- as.vector(P_i(gamma_new, Z_matrix))
+  
+  # p_fit <- auglag(
+  #   par = p_init,
+  #   fn = neg_logLik_p,
+  #   gr = gradient_neg_logLik_p,
+  #   Pi = Pi,
+  #   sample_size = sample_size,
+  #   heq = heq,
+  #   heq.jac = heq.jac,
+  #   hin = hin,
+  #   hin.jac = hin.jac
+  # )
 
-  p_new <- p_fit$par
+  p_fit <- newton_method(p_init, Pi, con$C, con$b, n = sample_size)
+
+  # p_new <- p_fit$par
+  p_new <- p_fit$p
+  # p_new <- pmax(p_new, 1e-8)
 
   cat("iter", iter, "p_i optim done", "\n")
 
@@ -1042,46 +1085,132 @@ for (iter in 1:max_iter) {
 
   LL_p[iter] <- -p_fit$value
   LL_gamma[iter] <- -gamma_fit$value
+  LL_full[iter] <- full_logLik(gamma_new, p_new)
+  mu_PL[iter] <- sum(p_new * final_sample_pref_raw$AGB)
 
-  if (delta_p < threshold && delta_gamma < threshold) {
-    cat("converged at iteration", iter, "\n")
-    break
-  }
+  # if (delta_p < threshold && delta_gamma < threshold) {
+  #   cat("converged at iteration", iter, "\n")
+  #   break
+  # }
+  
+  # if(iter > 1) {
+  #   delta_mu <- abs(mu_PL[iter] - mu_PL[iter -1])
+  #   delta_LL <- abs(LL_full[iter] - LL_full[iter - 1])
+  #   delta_p <- max(abs(p_new - p_init))
+  #   delta_gamma <- max(abs(gamma_new - gamma_init))
+  #   if (delta_mu < tol_mu && delta_LL < tol_LL && delta_gamma < tol_gamma && delta_p < tol_p) {
+  #     cat("Converged at iteration: ", iter, "\n")
+  #     break
+  #   }
+  # }
 
   gamma_init <- gamma_new
   p_init <- p_new
-  mu_PL[iter] <- sum(p_new * final_sample_pref_raw$AGB)
+  
 
 }
-
-data.frame(iter = 1:max_iter, p_change, gamma_change, LL_p, LL_gamma)
-
+df <- data.frame(iter = 1:max_iter, p_change, gamma_change, LL_p, LL_gamma, LL_full)
 mu_PL
-gamma_new
-pref_weights$gamma_B
-hist(p_new, xlab = "Sample Wt (p's): Prof. Lik. approach", main = "")
-range(p_new)
-(gamma_new)
-p_fit$convergence
-gamma_fit$convergence
-gamma_fit$message
-p_fit$message
 
-(heq(p_init))
-summary(heq(p_new))
 
-mu_y_EL_profile <- sum(p_new * final_sample_pref_raw$AGB)
-mu_y_EL_profile
-mean(final_sample_pref_raw$AGB)
-hist(LL_gamma)
-hist(LL_p)
-LL_p
+set.seed(123)
+gamma_init <- rnorm(ncol(Z_matrix), mean = 0, sd = 0.01)
 
-LL_gamma35 <- LL_gamma
-gamma_change35 <- gamma_change
-LL_p35 <- LL_p
-p_change35 <- p_change
-LL_gamma
-x <- data.frame(iter = 1:10, LL = LL_p)
+con <- make_constraints(rep(1 / sample_size, sample_size))
+st  <- interior_start(con$C, con$b)
+c(status = st$status, t = st$t)
 
+cache <- new.env()
+cache$p <- st$p
+
+solve_p <- function(gamma) {
+  Pi  <- as.vector(P_i(gamma, Z_matrix))
+  fit <- newton_method(cache$p, Pi, con$C, con$b, n = sample_size,
+                       max_iter = 200, tol = 1e-12)
+  cache$p <- fit$p
+  list(Pi = Pi, p = fit$p, value = fit$value)
+}
+
+fn_prof <- function(gamma) {
+  s <- solve_p(gamma)
+  -sum(log(s$Pi)) + s$value
+}
+
+gr_prof <- function(gamma) {
+  s <- solve_p(gamma)
+  gradient_neg_logLik_gamma(gamma, Z_matrix, s$p, sample_size)
+}
+
+fit <- optim(gamma_init, fn_prof, gr_prof, method = "BFGS",
+             control = list(maxit = 1000, reltol = 1e-12))
+
+gamma_new <- fit$par
+p_new <- solve_p(gamma_new)$p
+mu_hat <- sum(p_new * final_sample_pref_raw$AGB)
+
+fit$convergence                          # should be 0
+max(abs(gr_prof(gamma_new)))             # should be close to 0
+mu_hat
+
+
+
+mu_hat <- sum(p_new * final_sample_pref_raw$AGB)
+n <- nrow(final_sample_pref)
+n_g <- length(gamma_new)
+n_p <- length(p_new)
+
+Pi <- as.vector(P_i(gamma_new, Z_matrix))
+W <- Pi * (1-Pi)
+S <- sum(p_new * Pi)
+a <- as.vector(crossprod(Z_matrix, p_new * W))
+
+Hpp <- diag(1/p_new^2) - n*tcrossprod(Pi)/S^2
+# Hpp_num <- jacobian(
+#   function(p)
+#     gradient_neg_logLik_p(
+#       p,
+#       sample_size,
+#       Pi
+#     ),
+#   p_new,
+#   method = "simple"
+# )
+
+Hpg <- n * (W * Z_matrix / S - tcrossprod(Pi, a)/S^2)
+Hgp <- t(Hpg)
+
+Hgg <- crossprod(Z_matrix, W * Z_matrix) + n *(crossprod(Z_matrix, (p_new * W * (1 - 2 * Pi)) * Z_matrix)/S -
+                                                 tcrossprod(a)/S^2)
+
+H_block <- rbind(cbind(Hgg, Hgp), cbind(Hpg, Hpp))
+H_block <- (H_block + t(H_block))/2
+
+Cp <- heq.jac(p_new)
+Cs <- rbind(Cp[1, ], t(scale(t(Cp[-1, ]))))
+C <- cbind(matrix(0, nrow(Cs), n_g), Cs)
+
+# C <- cbind(matrix(0, nrow(heq.jac(p_new)), n_g), heq.jac(p_new))
+
+C <- cbind(matrix(0, nrow(con$C), n_g), con$C)
+K <- rbind(cbind(H_block, t(C)),
+           cbind(C, matrix(0, nrow(C), nrow(C))))
+
+g_vec  <- c(rep(0, n_g), final_sample_pref_raw$AGB)
+sol <- solve(K, c(g_vec, rep(0, nrow(C))))
+var_mu <- sum(g_vec * sol[1:(n_g + n_p)])
+var_mu
+
+ci_l <- mu_hat - 1.96 * sqrt(var_mu)
+ci_u <- mu_hat + 1.96 * sqrt(var_mu)
+ci_l
+ci_u
+
+C  <- cbind(matrix(0, nrow(con$C), n_g), con$C)
+B  <- MASS::Null(t(C))
+e  <- eigen(crossprod(B, H_block %*% B), symmetric = TRUE)
+sort(e$values)[1:4]
+
+
+Vflat <- B %*% e$vectors[, order(e$values)[1:2]]
+round(Vflat[1:n_g, ], 3)
 
