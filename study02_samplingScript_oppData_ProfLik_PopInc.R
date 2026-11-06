@@ -88,6 +88,7 @@ pref_sample <- function(alpha = 0, beta = 1, sample_size, agb_wrapped, agb_std_w
   valid <- !is.na(lam_values)
   
   counts[valid] <- rpois(sum(valid), lam_values[valid])
+  counts[valid] <- pmin(counts[valid], 1)
   
   cells_positive <- rep(which(!is.na(counts) & counts > 0))
   
@@ -1115,13 +1116,13 @@ set.seed(123)
 results_list <- future_lapply(
   1:mc_reps,
   function(r) {
-    # final_sample <- pref_sample(alpha = 0, beta = 1, sample_size = sample_size, agb_wrapped, agb_std_wrapped)
-    final_sample <- accessibility_sample(alpha = 10, beta = 20, sample_size = sample_size, agb_wrapped, dist_std_wrapped)
+    final_sample <- pref_sample(alpha = 0, beta = 1, sample_size = sample_size, agb_wrapped, agb_std_wrapped)
+    # final_sample <- accessibility_sample(alpha = 0, beta = 1, sample_size = sample_size, agb_wrapped, dist_std_wrapped)
     # final_sample <- pref_resp_covar_sample(alpha = 0, beta0 = 1, beta1 = 0.5, sample_size = 500, agb_wrapped, agb_std_wrapped, covars_std_wrapped)
-    # final_sample <- strongly_clustered_sample(s = 0.9, sample_size, agb_wrapped, strata_IDs)
+    # final_sample <- strongly_clustered_sample(s = 0.6, sample_size, agb_wrapped, strata_IDs)
     # final_sample <- clhs_sample(sample_size = sample_size, agb_wrapped, covars_df = covars_df_new)
     # result <- pesudo_weight_profileLik(r, final_sample, max_iter = 10, agb_wrapped, covars_wrapped, aux_df)
-    result <- pseudo_weight_knn_EL_clac(r, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
+    # result <- pseudo_weight_knn_EL_clac(r, final_sample, agb_wrapped, covars_wrapped, aux_df, covars_names, true_mean)
     # result <- pesudo_weight_profileLik_pop(r, final_sample, max_iter = 5, agb_wrapped, covars_wrapped, aux_df, true_mean)
     # result <- tryCatch(
     #   pesudo_weight_profileLik_pop(r, final_sample, max_iter = 20, agb_wrapped, covars_wrapped, aux_df, ture_mean),
@@ -1130,20 +1131,20 @@ results_list <- future_lapply(
     #         file = "progress_log.txt", append = TRUE)
     #     c(rep = r, naive_mean = NA, mu_y_EL = NA)
     #   })
-
-    cat(sprintf("MC iter %d done | naive_mean = %.3f | mu_y_EL = %.3f | var = %.3f | ci_l = %.3f | ci_u = %.3f\n",
-                r, result["naive_mean"], result["mu_y_EL"], result["var_mu"], result["ci_l"], result["ci_u"]),
-        file = "progress_log.txt", append = TRUE)
-    result
+    # 
+    # cat(sprintf("MC iter %d done | naive_mean = %.3f | mu_y_EL = %.3f | var = %.3f | ci_l = %.3f | ci_u = %.3f\n",
+    #             r, result["naive_mean"], result["mu_y_EL"], result["var_mu"], result["ci_l"], result["ci_u"]),
+    #     file = "progress_log.txt", append = TRUE)
+    # result
     
     # cat(sprintf("MC iter %d done\n", r), file = "progress_log.txt", append = TRUE)
     
     # cat(sprintf("MC iter %d done | naive_mean = %.3f | mu_y_EL = %.3f | pseudo_weight_mean = %.3f | var_mu = %.3f\n",
     #             r, result["naive_mean"], result["mu_y_EL"], result["pseudo_weight_mean"], result["var_mu"]),
     #     file = "progress_log.txt", append = TRUE)
-    result
+    # result
     
-    # final_sample
+    final_sample
     },
   future.seed = TRUE
 )
@@ -1151,8 +1152,9 @@ results_list <- future_lapply(
 plan(sequential)
 
 results <- as.data.frame(do.call(rbind, results_list))
+n <- sapply(results_list, nrow)
 
-write.csv(results, "C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_AGB_expCorrResid180_acessSample_EL_var.csv", row.names = FALSE)
+write.csv(results, "C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_AGB_expCorrResid180_acessSample5_NewLik_var.csv", row.names = FALSE)
 results <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_AGB_expCorrResid180_prefSample10_EL_var.csv")
 
 head(results)
@@ -1201,18 +1203,18 @@ results_accuracy
 ####################TRUE#####################################################################
 ## Profile Likelihood Testing
 set.seed(123)
-# final_sample_pref <- pref_sample(0, 1, 500, agb_wrapped, agb_std_wrapped)
-# final_sample_pref <- accessibility_sample(alpha = 10, beta = 20, sample_size = 500, agb_wrapped, dist_std_wrapped)
-final_sample_pref <- pref_resp_covar_sample(alpha = 0, beta0 = 1, beta1 = 0.5, sample_size = 500, agb_wrapped, agb_std_wrapped, covars_std_wrapped)
-# final_sample_pref <- strongly_clustered_sample(s = 0.9, 500, agb_wrapped, strata_IDs)
+final_sample_pref <- pref_sample(0, 1, 500, agb_wrapped, agb_std_wrapped)
+# final_sample_pref <- accessibility_sample(alpha = 0, beta = 1, sample_size = 500, agb_wrapped, dist_std_wrapped)
+# final_sample_pref <- pref_resp_covar_sample(alpha = 0, beta0 = 1, beta1 = 0.5, sample_size = 500, agb_wrapped, agb_std_wrapped, covars_std_wrapped)
+# final_sample_pref <- strongly_clustered_sample(s = 0.6, 500, agb_wrapped, strata_IDs)
 # final_sample_pref <- clhs_sample(500, agb_wrapped, covars_df_new)
 # final_sample_pref <- results_list[[1]]
 
 final_sample_pref_sf <- st_as_sf(final_sample_pref, coords = c("x", "y"), crs = crs(covars))
 
-# plot(agb)
-# plot(final_sample_pref_sf, add = TRUE, pch = 16, col = "red")
-# plot(roads_vect, add = TRUE, lwd = 2)
+plot(agb)
+plot(final_sample_pref_sf, add = TRUE, pch = 16, col = "red")
+plot(roads_vect, add = TRUE, lwd = 2)
 
 covar_vals <- extract(covars, final_sample_pref[, c("x", "y")])
 final_sample_pref <- cbind(final_sample_pref, covar_vals[, -1])

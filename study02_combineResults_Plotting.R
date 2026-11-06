@@ -41,7 +41,6 @@ prefSample05_results <- read.csv("C:/Documents_PhD/Study02/study02_results/study
 prefSample10_results <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_AGB_expCorrResid180_prefSample10_var.csv")
 prefSampleCovars10_results <- read.csv("C:/Documents_PhD/Study02/study02_results/study02_agg/study02_results_agbSimulation_exp_NDVI_EVI_AGB_expCorrResid180_prefSampleCovars10_var.csv")
 
-
 ## Accuracy metrics over the MC simulations
 accuracy_metrics <- function(df, pop_mean) {
   
@@ -207,3 +206,44 @@ ggplot(var_table, aes(Method, Ratio, fill = Method)) +
   labs(y = "Mean estimated variance / MC variance", x = NULL) +
   theme_minimal() +
   theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
+
+
+
+make_var_df <- function(df, name) {
+  bind_rows(
+    data.frame(estimator = "mu_y_EL", value = df$var_mu, mc = var(df$mu_y_EL, na.rm = TRUE)),
+    data.frame(estimator = "mu_y_NewLik", value = df$var_mu_NewLik, mc = var(df$mu_y_NewLik, na.rm = TRUE))
+    ) %>% mutate(sampling = name)
+}
+
+var_df <- bind_rows(make_var_df(clustSample_results, "Strongly Clustered"),
+                    make_var_df(accessSample_results, "Accessibility Roads"),
+                    make_var_df(prefSample05_results, "Preferential 0.5"),
+                    make_var_df(prefSample10_results, "Preferential 1.0"),
+                    make_var_df(prefSampleCovars10_results, "Preferential 1.0, Covars"))
+
+var_df$estimator <- factor(var_df$estimator, levels = c("mu_y_EL", "mu_y_NewLik"))
+mc_df <- var_df %>% distinct(sampling, estimator, mc)
+est_labels2 <- c("mu_y_EL" = "SBEL", "mu_y_NewLik" = "PIEL")
+
+ggplot(var_df, aes(x = estimator, y = value, fill = estimator, color = estimator)) +
+  geom_violin(alpha = 0.5, trim = FALSE) +
+  geom_jitter(width = 0, alpha = 0.4, size = 2) +
+  geom_boxplot(width = 0.15, outlier.shape = NA, color = "black") +
+  geom_point(data = mc_df, aes(x = estimator, y = mc),
+             shape = 18, size = 5, color = "red", inherit.aes = FALSE) +
+  facet_wrap(~sampling, scales = "free_y") +
+  scale_x_discrete(labels = est_labels2) +
+  scale_fill_discrete(labels = est_labels2) +
+  scale_color_discrete(labels = est_labels2) +
+  labs(title = "Estimated Variance of the Mean Estimators",
+       subtitle = "Red diamond = Monte Carlo variance of the estimator",
+       y = "Estimated variance", x = NULL) +
+  theme_minimal(base_size = 18) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    plot.title = element_text(face = "bold"),
+    axis.title = element_text(face = "bold"),
+    axis.text = element_text(face = "bold")
+  )
